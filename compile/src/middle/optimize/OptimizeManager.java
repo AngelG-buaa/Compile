@@ -97,7 +97,7 @@ public class OptimizeManager {
         optimizers.add(new BuildCFG());
 
         // 5. 多轮局部值编号和死代码消除优化
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < 10; i++) {
             optimizers.add(new LocalValueNumbering());
             optimizers.add(new RemoveUnReachCode());
             optimizers.add(new BuildCFG());

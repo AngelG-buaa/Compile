@@ -14,18 +14,6 @@ public class Andi extends InstrM {
         this.immediate = immediate;
     }
 
-    public Reg getDestination() {
-        return destination;
-    }
-
-    public Reg getSource() {
-        return source;
-    }
-
-    public int getImmediate() {
-        return immediate;
-    }
-
     @Override
     public String toString() {
         // 说明：andi 用于与 16 位无符号立即数按位与，常用于掩码 (如 0xFF)

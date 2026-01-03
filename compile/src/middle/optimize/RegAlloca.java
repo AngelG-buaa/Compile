@@ -26,7 +26,8 @@ public class RegAlloca {
 
     // 可用寄存器池 (严格限制)
     private static final List<Reg> ALLOCATABLE_REGS = Arrays.asList(
-            Reg.t3, Reg.t4, Reg.t5, Reg.t6, Reg.t7, Reg.t8, Reg.t9
+            Reg.t3, Reg.t4, Reg.t5, Reg.t6, Reg.t7, Reg.t8, Reg.t9,
+            Reg.s3, Reg.s4, Reg.s5, Reg.s6, Reg.s7
     );
 
     // 活跃区间定义

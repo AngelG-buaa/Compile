@@ -14,18 +14,6 @@ public abstract class BranchM extends InstrM {
         this.targetLabel = targetLabel;
     }
 
-    public Reg getLeft() {
-        return left;
-    }
-
-    public Reg getRight() {
-        return right;
-    }
-
-    public String getTargetLabel() {
-        return targetLabel;
-    }
-
     public String toString(String opCode) {
         return String.format("%s %s, %s, %s", opCode, left, right, targetLabel);
     }

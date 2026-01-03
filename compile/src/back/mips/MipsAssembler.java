@@ -319,8 +319,6 @@ public class MipsAssembler {
         // - 移除 move r, r
         // - 折叠 [li rC, imm] + [addu dst, base, rC] => addiu dst, base, imm
         // - 折叠 [li rC, imm] + [addu addr, base, rC] + [mem *, 0(addr)] => [mem *, imm(base)]
-        // - 分支反转：beq/bne + j + 目标标签 => 反转分支指向 j 的目标，移除 j
-        // - 字节零扩展：lb + andi 0xFF => lbu
         ArrayList<InstrM> out = new ArrayList<>();
         int i = 0;
         while (i < instructions.size()) {
@@ -383,43 +381,6 @@ public class MipsAssembler {
                 Addiu a = (Addiu) cur;
                 if (a.getImmediate() == 0 && a.getDestination() == a.getSource()) {
                     i++;
-                    continue;
-                }
-            }
-
-            // 分支反转以消除紧随其后的 j 并让程序自然落入目标标签
-            if (i + 2 < instructions.size() && cur instanceof back.mips.instruction.branch.BranchM && instructions.get(i + 1) instanceof J && instructions.get(i + 2) instanceof back.mips.data.Label) {
-                back.mips.instruction.branch.BranchM br = (back.mips.instruction.branch.BranchM) cur;
-                J jmp = (J) instructions.get(i + 1);
-                back.mips.data.Label lbl = (back.mips.data.Label) instructions.get(i + 2);
-                Object destObj = jmp.getDestination();
-                if (destObj instanceof String) {
-                    String jDest = (String) destObj;
-                    if (lbl.getIdentifier().equals(br.getTargetLabel())) {
-                        InstrM replaced;
-                        if (br instanceof back.mips.instruction.branch.Beq) {
-                            replaced = new back.mips.instruction.branch.Bne(br.getLeft(), br.getRight(), jDest);
-                        } else if (br instanceof back.mips.instruction.branch.Bne) {
-                            replaced = new back.mips.instruction.branch.Beq(br.getLeft(), br.getRight(), jDest);
-                        } else {
-                            replaced = null;
-                        }
-                        if (replaced != null) {
-                            out.add(replaced);
-                            i += 2; // 跳过 j，保留后续的标签
-                            continue;
-                        }
-                    }
-                }
-            }
-
-            // 折叠 lb + andi 0xFF 为 lbu，避免额外的零扩展指令
-            if (i + 1 < instructions.size() && cur instanceof Lb && instructions.get(i + 1) instanceof back.mips.instruction.compute.Andi) {
-                Lb lb = (Lb) cur;
-                back.mips.instruction.compute.Andi andi = (back.mips.instruction.compute.Andi) instructions.get(i + 1);
-                if (andi.getImmediate() == 0xFF && andi.getSource() == lb.getTargetReg() && andi.getDestination() == lb.getTargetReg()) {
-                    out.add(new Lbu(lb.getTargetReg(), lb.getOffset(), lb.getBaseReg()));
-                    i += 2;
                     continue;
                 }
             }
