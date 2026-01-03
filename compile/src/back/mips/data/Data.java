@@ -16,6 +16,10 @@ public abstract class Data extends InstrM {
         this.identifier = identifier;
     }
 
+    public String getIdentifier() {
+        return identifier;
+    }
+
     @Override
     public boolean equals(Object obj) {
         if (this == obj) return true;

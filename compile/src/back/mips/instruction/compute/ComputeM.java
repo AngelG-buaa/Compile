@@ -18,6 +18,21 @@ public class ComputeM extends InstrM {
         return destination != null;
     }
 
+    public Reg getDestination() {
+        // Peephole 使用：匹配/替换需要读取目标与左右操作数
+        return destination;
+    }
+
+    public Reg getLeft() {
+        // Peephole 使用
+        return left;
+    }
+
+    public Reg getRight() {
+        // Peephole 使用
+        return right;
+    }
+
     public String toString(String opCode) {
         if (hasDestination()) {
             return String.format("%s %s, %s, %s", opCode, destination, left, right);

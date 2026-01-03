@@ -9,6 +9,10 @@ public abstract class JumpM extends InstrM {
         this.destination = destination;
     }
 
+    public Object getDestination() {
+        return destination;
+    }
+
     public String toString(String opCode) {
         return opCode + " " + destination;
     }

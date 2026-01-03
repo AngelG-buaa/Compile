@@ -278,18 +278,259 @@ public class MipsCodeGenerator extends MipsAssembler {
      * @param instr 二元运算指令
      */
     public void mapCompute(BinaryOperationInstruction instr) {
+        // 优化说明：
+        // 1) 双常量折叠：若左右操作数均为常量，直接在生成期计算结果并发出 li/store，避免运行期算术
+        // 2) 强度削减：针对 +0、-0、×0、×1、×(-1)、÷1、÷(-1) 特判，减少 Mult/Div 指令并用 move/取相反数替代
+        // 3) 其他情况保持原路径，必要时仍生成算术指令
         Reg target = findReg(instr);
+        IRValue op0 = instr.getOperand(0);
+        IRValue op1 = instr.getOperand(1);
+
+        boolean c0 = op0 instanceof IntegerConstant;
+        boolean c1 = op1 instanceof IntegerConstant;
+        int v0 = c0 ? ((IntegerConstant) op0).getConstantValue() : 0;
+        int v1 = c1 ? ((IntegerConstant) op1).getConstantValue() : 0;
+
+        if (c0 && c1) {
+            int res = 0;
+            switch (instr.getOperator()) {
+                case ADD: res = v0 + v1; break;
+                case SUB: res = v0 - v1; break;
+                case MUL: res = v0 * v1; break;
+                case SDIV: res = v1 != 0 ? (v0 / v1) : 0; break;
+                case SREM: res = v1 != 0 ? (v0 % v1) : 0; break;
+                default: break;
+            }
+            // 双常量直接输出立即数，目标在寄存器或栈分别处理
+            if (target != null) {
+                makeLi(target, res);
+            } else {
+                makeLi(Reg.k0, res);
+                makeStore(4, Reg.k0, findOffset(instr), Reg.sp);
+            }
+            return;
+        }
+
+        if (instr.getOperator() == BinaryOperationInstruction.BinaryOperator.ADD) {
+            // 加法常量优化：若一侧为常量且在 addiu 范围内，直接使用 addiu
+            if (c0 && !c1 && v0 >= -32768 && v0 <= 32767) {
+                Reg base = Reg.k0;
+                loadValToReg(op1, base);
+                if (target != null) {
+                    makeAddiu(target, base, v0);
+                } else {
+                    makeAddiu(base, base, v0);
+                    makeStore(4, base, findOffset(instr), Reg.sp);
+                }
+                return;
+            }
+            if (!c0 && c1 && v1 >= -32768 && v1 <= 32767) {
+                Reg base = Reg.k0;
+                loadValToReg(op0, base);
+                if (target != null) {
+                    makeAddiu(target, base, v1);
+                } else {
+                    makeAddiu(base, base, v1);
+                    makeStore(4, base, findOffset(instr), Reg.sp);
+                }
+                return;
+            }
+            // 加法特判：+0
+            if (c0 && v0 == 0) {
+                if (target != null) {
+                    loadValToReg(op1, target);
+                } else {
+                    loadValToReg(op1, Reg.k0);
+                    makeStore(4, Reg.k0, findOffset(instr), Reg.sp);
+                }
+                return;
+            }
+            if (c1 && v1 == 0) {
+                if (target != null) {
+                    loadValToReg(op0, target);
+                } else {
+                    loadValToReg(op0, Reg.k0);
+                    makeStore(4, Reg.k0, findOffset(instr), Reg.sp);
+                }
+                return;
+            }
+        } else if (instr.getOperator() == BinaryOperationInstruction.BinaryOperator.SUB) {
+            // 减法特判：-0、0 - x
+            if (c1 && v1 == 0) {
+                if (target != null) {
+                    loadValToReg(op0, target);
+                } else {
+                    loadValToReg(op0, Reg.k0);
+                    makeStore(4, Reg.k0, findOffset(instr), Reg.sp);
+                }
+                return;
+            }
+            if (c0 && v0 == 0) {
+                Reg r = Reg.k0;
+                loadValToReg(op1, r);
+                if (target != null) {
+                    makeCompute(BinaryOperationInstruction.BinaryOperator.SUB, target, Reg.zero, r);
+                } else {
+                    makeCompute(BinaryOperationInstruction.BinaryOperator.SUB, r, Reg.zero, r);
+                    makeStore(4, r, findOffset(instr), Reg.sp);
+                }
+                return;
+            }
+        } else if (instr.getOperator() == BinaryOperationInstruction.BinaryOperator.MUL) {
+            // 乘法位移优化：若常量为 2 的幂，使用 sll 代替乘法
+            if (c0 && !c1 && v0 != 0 && (v0 & (v0 - 1)) == 0) {
+                int shift = Integer.numberOfTrailingZeros(v0);
+                Reg src = Reg.k0;
+                loadValToReg(op1, src);
+                if (target != null) {
+                    makeSll(target, src, shift);
+                } else {
+                    makeSll(src, src, shift);
+                    makeStore(4, src, findOffset(instr), Reg.sp);
+                }
+                return;
+            }
+            if (!c0 && c1 && v1 != 0 && (v1 & (v1 - 1)) == 0) {
+                int shift = Integer.numberOfTrailingZeros(v1);
+                Reg src = Reg.k0;
+                loadValToReg(op0, src);
+                if (target != null) {
+                    makeSll(target, src, shift);
+                } else {
+                    makeSll(src, src, shift);
+                    makeStore(4, src, findOffset(instr), Reg.sp);
+                }
+                return;
+            }
+            // 乘法特判：×0、×1、×(-1)
+            if ((c0 && v0 == 0) || (c1 && v1 == 0)) {
+                if (target != null) {
+                    makeLi(target, 0);
+                } else {
+                    makeLi(Reg.k0, 0);
+                    makeStore(4, Reg.k0, findOffset(instr), Reg.sp);
+                }
+                return;
+            }
+            if (c0 && v0 == 1) {
+                if (target != null) {
+                    loadValToReg(op1, target);
+                } else {
+                    loadValToReg(op1, Reg.k0);
+                    makeStore(4, Reg.k0, findOffset(instr), Reg.sp);
+                }
+                return;
+            }
+            if (c1 && v1 == 1) {
+                if (target != null) {
+                    loadValToReg(op0, target);
+                } else {
+                    loadValToReg(op0, Reg.k0);
+                    makeStore(4, Reg.k0, findOffset(instr), Reg.sp);
+                }
+                return;
+            }
+            if ((c0 && v0 == -1) || (c1 && v1 == -1)) {
+                // x * (-1) -> 取相反数
+                IRValue nonConst = c0 ? op1 : op0;
+                Reg r = Reg.k0;
+                loadValToReg(nonConst, r);
+                if (target != null) {
+                    makeCompute(BinaryOperationInstruction.BinaryOperator.SUB, target, Reg.zero, r);
+                } else {
+                    makeCompute(BinaryOperationInstruction.BinaryOperator.SUB, r, Reg.zero, r);
+                    makeStore(4, r, findOffset(instr), Reg.sp);
+                }
+                return;
+            }
+        } else if (instr.getOperator() == BinaryOperationInstruction.BinaryOperator.SDIV) {
+            // 除法特判：÷1、÷(-1)
+            if (c1 && v1 == 1) {
+                if (target != null) {
+                    loadValToReg(op0, target);
+                } else {
+                    loadValToReg(op0, Reg.k0);
+                    makeStore(4, Reg.k0, findOffset(instr), Reg.sp);
+                }
+                return;
+            }
+            if (c1 && v1 == -1) {
+                Reg r = Reg.k0;
+                loadValToReg(op0, r);
+                if (target != null) {
+                    makeCompute(BinaryOperationInstruction.BinaryOperator.SUB, target, Reg.zero, r);
+                } else {
+                    makeCompute(BinaryOperationInstruction.BinaryOperator.SUB, r, Reg.zero, r);
+                    makeStore(4, r, findOffset(instr), Reg.sp);
+                }
+                return;
+            }
+            if (c1 && v1 != 0) {
+                int abs = Math.abs(v1);
+                if ((abs & (abs - 1)) == 0) {
+                    int k = Integer.numberOfTrailingZeros(abs);
+                    Reg x = Reg.k0;
+                    loadValToReg(op0, x);
+                    makeSra(Reg.t1, x, 31);
+                    makeAndi(Reg.t1, Reg.t1, (1 << k) - 1);
+                    makeCompute(BinaryOperationInstruction.BinaryOperator.ADD, x, x, Reg.t1);
+                    if (v1 > 0) {
+                        if (target != null) {
+                            makeSra(target, x, k);
+                        } else {
+                            makeSra(x, x, k);
+                            makeStore(4, x, findOffset(instr), Reg.sp);
+                        }
+                    } else {
+                        makeSra(Reg.t2, x, k);
+                        if (target != null) {
+                            makeCompute(BinaryOperationInstruction.BinaryOperator.SUB, target, Reg.zero, Reg.t2);
+                        } else {
+                            makeCompute(BinaryOperationInstruction.BinaryOperator.SUB, Reg.t2, Reg.zero, Reg.t2);
+                            makeStore(4, Reg.t2, findOffset(instr), Reg.sp);
+                        }
+                    }
+                    return;
+                }
+            }
+        } else if (instr.getOperator() == BinaryOperationInstruction.BinaryOperator.SREM) {
+            // 取余优化：当除数为 2 的幂时，使用移位与减法计算 srem
+            // 算法：q = (x + ((x>>31) & ((1<<k)-1))) >> k; r = x - (q << k)
+            // 说明：该算法实现向零取整的余数语义，适用于任意符号的 x
+            if (c1 && v1 != 0) {
+                int abs = Math.abs(v1);
+                if ((abs & (abs - 1)) == 0) {
+                    int k = Integer.numberOfTrailingZeros(abs);
+                    Reg x = Reg.k0;
+                    loadValToReg(op0, x);
+                    // 计算 bias：(x>>31) & ((1<<k)-1)
+                    makeSra(Reg.t1, x, 31);
+                    makeAndi(Reg.t1, Reg.t1, (1 << k) - 1);
+                    // 计算 q = (x + bias) >> k
+                    makeCompute(BinaryOperationInstruction.BinaryOperator.ADD, Reg.t1, x, Reg.t1);
+                    makeSra(Reg.t1, Reg.t1, k);
+                    // 计算 r = x - (q << k)
+                    makeSll(Reg.t2, Reg.t1, k);
+                    if (target != null) {
+                        makeCompute(BinaryOperationInstruction.BinaryOperator.SUB, target, x, Reg.t2);
+                    } else {
+                        makeCompute(BinaryOperationInstruction.BinaryOperator.SUB, x, x, Reg.t2);
+                        makeStore(4, x, findOffset(instr), Reg.sp);
+                    }
+                    return;
+                }
+            }
+        }
+
         Reg r1 = Reg.k0, r2 = Reg.k1;
-        loadValToReg(instr.getOperand(0), r1);
-        loadValToReg(instr.getOperand(1), r2);
+        loadValToReg(op0, r1);
+        loadValToReg(op1, r2);
 
         if (target != null) {
-            // 如果目标分配了寄存器，直接写入目标寄存器
             makeCompute(instr, target, r1, r2);
         } else {
-            // 如果目标在栈上，先计算到临时寄存器 k0，再存入栈
-            makeCompute(instr, r1, r1, r2); // 计算结果暂存 k0 (这里复用了 r1，即 k0)
-            makeStore(4, r1, findOffset(instr), Reg.sp); // i32 运算结果存栈
+            makeCompute(instr, r1, r1, r2);
+            makeStore(4, r1, findOffset(instr), Reg.sp);
         }
     }
 
@@ -309,16 +550,24 @@ public class MipsCodeGenerator extends MipsAssembler {
         // Alloca 指令本身返回的是地址(指针)，这个地址值(offset)需要存起来
         // 该地址是相对于当前函数栈底(SP)的动态偏移
         Reg target = findReg(alloca);
-        
+        // 优化：使用 addiu 直接计算 SP + 常量偏移，避免 li + addu 两条指令
+        // 安全性：addiu 立即数需在 16 位有符号范围内，否则退回 li+addu
+        boolean fit16 = currentOffset >= -32768 && currentOffset <= 32767;
         if (target != null) {
-            // 计算绝对地址：SP + currentOffset
-            makeLi(target, currentOffset).setNote(new Note(alloca));
-            makeCompute(BinaryOperationInstruction.BinaryOperator.ADD, target, Reg.sp, target);
+            if (fit16) {
+                makeAddiu(target, Reg.sp, currentOffset).setNote(new Note(alloca));
+            } else {
+                makeLi(target, currentOffset).setNote(new Note(alloca));
+                makeCompute(BinaryOperationInstruction.BinaryOperator.ADD, target, Reg.sp, target);
+            }
         } else {
-            // 如果 alloca 指针本身也存栈上
-            makeLi(Reg.k0, currentOffset).setNote(new Note(alloca));
-            makeCompute(BinaryOperationInstruction.BinaryOperator.ADD, Reg.k0, Reg.sp, Reg.k0);
-            makeStore(4, Reg.k0, findOffset(alloca), Reg.sp); // 指针本身是4字节
+            if (fit16) {
+                makeAddiu(Reg.k0, Reg.sp, currentOffset).setNote(new Note(alloca));
+            } else {
+                makeLi(Reg.k0, currentOffset).setNote(new Note(alloca));
+                makeCompute(BinaryOperationInstruction.BinaryOperator.ADD, Reg.k0, Reg.sp, Reg.k0);
+            }
+            makeStore(4, Reg.k0, findOffset(alloca), Reg.sp);
         }
     }
 
@@ -417,18 +666,25 @@ public class MipsCodeGenerator extends MipsAssembler {
         }
 
         // 7. 移动 SP, 跳转 Jal, 恢复 RA, 恢复 SP
-        // 移动 SP 到新栈帧底部
-        makeLi(Reg.k0, currentOffset - frameSize);
-        makeCompute(BinaryOperationInstruction.BinaryOperator.ADD, Reg.sp, Reg.sp, Reg.k0);
+        int spDelta = currentOffset - frameSize;
+        if (spDelta >= -32768 && spDelta <= 32767) {
+            makeAddiu(Reg.sp, Reg.sp, spDelta);
+        } else {
+            makeLi(Reg.k0, spDelta);
+            makeCompute(BinaryOperationInstruction.BinaryOperator.ADD, Reg.sp, Reg.sp, Reg.k0);
+        }
 
         makeJal(name);
 
-        // 调用返回后，恢复 RA (注意它在栈中的位置，此时 SP 还在新栈帧底部，需要根据偏移找回)
-        makeLoad(4, Reg.ra, stackArgsSize, Reg.sp); // 恢复 RA
+        makeLoad(4, Reg.ra, stackArgsSize, Reg.sp);
 
-        // 恢复 SP 到原栈帧位置
-        makeLi(Reg.k0, -(currentOffset - frameSize));
-        makeCompute(BinaryOperationInstruction.BinaryOperator.ADD, Reg.sp, Reg.sp, Reg.k0);
+        int spRestore = -(currentOffset - frameSize);
+        if (spRestore >= -32768 && spRestore <= 32767) {
+            makeAddiu(Reg.sp, Reg.sp, spRestore);
+        } else {
+            makeLi(Reg.k0, spRestore);
+            makeCompute(BinaryOperationInstruction.BinaryOperator.ADD, Reg.sp, Reg.sp, Reg.k0);
+        }
 
 
         // 8. 恢复上下文 (Restore)
@@ -571,20 +827,27 @@ public class MipsCodeGenerator extends MipsAssembler {
             // 常量索引优化
             int val = ((IntegerConstant) idx).getConstantValue();
             if (val == 0) return; // 偏移为0，忽略
-            makeLi(Reg.t0, val * size);
-            makeCompute(BinaryOperationInstruction.BinaryOperator.ADD, offsetReg, offsetReg, Reg.t0);
+            // 使用 addiu 直接叠加偏移；超出 16 位范围退回 li+addu
+            int imm = val * size;
+            if (imm >= -32768 && imm <= 32767) {
+                makeAddiu(offsetReg, offsetReg, imm);
+            } else {
+                makeLi(Reg.t0, imm);
+                makeCompute(BinaryOperationInstruction.BinaryOperator.ADD, offsetReg, offsetReg, Reg.t0);
+            }
         } else {
             // 变量索引
             Reg idxReg = Reg.t0;
             if (findReg(idx) != null) idxReg = findReg(idx);
             else makeLoad(4, idxReg, findOffset(idx), Reg.sp);
 
-            if (size == 4) {
-                // 如果元素大小是 4，用左移 2 位代替乘法
-                makeSll(Reg.t2, idxReg, 2);
+            if ((size & (size - 1)) == 0) {
+                // 元素大小为 2 的幂：用左移替代乘法，shift=log2(size)
+                int shift = Integer.numberOfTrailingZeros(size);
+                makeSll(Reg.t2, idxReg, shift);
                 makeCompute(BinaryOperationInstruction.BinaryOperator.ADD, offsetReg, offsetReg, Reg.t2);
             } else {
-                // 通用乘法
+                // 非 2 的幂：保留乘法路径
                 makeLi(Reg.t1, size);
                 makeCompute(BinaryOperationInstruction.BinaryOperator.MUL, Reg.t2, idxReg, Reg.t1);
                 makeCompute(BinaryOperationInstruction.BinaryOperator.ADD, offsetReg, offsetReg, Reg.t2);
@@ -660,18 +923,43 @@ public class MipsCodeGenerator extends MipsAssembler {
      * @param icmp 比较指令
      */
     public void mapIcmp(CompareInstruction icmp) {
+        // 优化：两侧为常量时直接在生成期计算布尔结果 (0/1)，避免生成比较指令
+        IRValue l = icmp.getLeftOperand();
+        IRValue r = icmp.getRightOperand();
+        boolean cl = l instanceof IntegerConstant;
+        boolean cr = r instanceof IntegerConstant;
+        if (cl && cr) {
+            int lv = ((IntegerConstant) l).getConstantValue();
+            int rv = ((IntegerConstant) r).getConstantValue();
+            int res = 0;
+            switch (icmp.getCondition()) {
+                case EQ: res = (lv == rv) ? 1 : 0; break;
+                case NE: res = (lv != rv) ? 1 : 0; break;
+                case SLT: res = (lv < rv) ? 1 : 0; break;
+                case SLE: res = (lv <= rv) ? 1 : 0; break;
+                case SGT: res = (lv > rv) ? 1 : 0; break;
+                case SGE: res = (lv >= rv) ? 1 : 0; break;
+                default: break;
+            }
+            Reg t = findReg(icmp);
+            if (t != null) {
+                makeLi(t, res);
+            } else {
+                makeLi(Reg.k0, res);
+                makeStore(1, Reg.k0, findOffset(icmp), Reg.sp);
+            }
+            return;
+        }
+
         Reg r1 = Reg.k0, r2 = Reg.k1;
-        loadValToReg(icmp.getLeftOperand(), r1);
-        loadValToReg(icmp.getRightOperand(), r2);
+        loadValToReg(l, r1);
+        loadValToReg(r, r2);
 
         Reg target = findReg(icmp);
         if (target == null) target = Reg.k0;
-
-        // 生成比较指令 (如 slt, seq 等)
         makeCompare(icmp.getCondition(), target, r1, r2);
-
         if (findReg(icmp) == null) {
-            makeStore(1, target, findOffset(icmp), Reg.sp); // boolean is i1/i8 -> byte
+            makeStore(1, target, findOffset(icmp), Reg.sp);
         }
     }
 
@@ -770,15 +1058,39 @@ public class MipsCodeGenerator extends MipsAssembler {
      * @param zext 零扩展指令
      */
     public void mapZext(ZeroExtendInstruction zext) {
-        Reg tmp = Reg.k0;
-        // Zext from i1/i8 -> i32. Load as byte, store as word/reg
-        loadValToReg(zext.getOperand(0), tmp); // This handles load byte if needed
-
+        // 完整零扩展优化：
+        // 1) 常量来源：生成期掩码 0xFF 后直接 li/store
+        // 2) 寄存器来源：使用 andi 掩码，避免符号扩展
+        // 3) 内存来源：使用 lbu 无符号装载，再 move/store
+        IRValue src = zext.getOperand(0);
         Reg target = findReg(zext);
-        if (target == null) {
-            makeStore(4, tmp, findOffset(zext), Reg.sp);
-        } else if (target != tmp) {
-            makeMove(target, tmp);
+        if (src instanceof IntegerConstant) {
+            int v = ((IntegerConstant) src).getConstantValue() & 0xFF;
+            if (target != null) {
+                makeLi(target, v);
+            } else {
+                makeLi(Reg.k0, v);
+                makeStore(4, Reg.k0, findOffset(zext), Reg.sp);
+            }
+            return;
+        }
+        if (findReg(src) != null) {
+            Reg r = findReg(src);
+            if (target == null) {
+                makeMove(Reg.k0, r);
+                makeAndi(Reg.k0, Reg.k0, 0xFF);
+                makeStore(4, Reg.k0, findOffset(zext), Reg.sp);
+            } else {
+                makeAndi(target, r, 0xFF);
+            }
+        } else {
+            Reg tmp = Reg.k0;
+            makeLoadUnsignedByte(tmp, findOffset(src), Reg.sp);
+            if (target == null) {
+                makeStore(4, tmp, findOffset(zext), Reg.sp);
+            } else if (target != tmp) {
+                makeMove(target, tmp);
+            }
         }
     }
 
@@ -787,15 +1099,17 @@ public class MipsCodeGenerator extends MipsAssembler {
      * @param trunc 截断指令
      */
     public void mapTrunc(TruncateInstruction trunc) {
-        // Trunc i32 -> i8. Load word, store byte.
+        // Trunc i32 -> i8.
+        // 优化：当目标在寄存器时使用 andi 0xFF 保证低字节；否则按字节存储到栈
         Reg tmp = Reg.k0;
         loadValToReg(trunc.getOriginalValue(), tmp);
 
         Reg target = findReg(trunc);
         if (target == null) {
             makeStore(1, tmp, findOffset(trunc), Reg.sp);
-        } else if (target != tmp) {
-            makeMove(target, tmp);
+        } else {
+            if (target != tmp) makeMove(target, tmp);
+            makeAndi(target, target, 0xFF);
         }
     }
 

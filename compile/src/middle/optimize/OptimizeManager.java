@@ -106,9 +106,7 @@ public class OptimizeManager {
         }
         optimizers.add(new RegAllocaOptimizer());
         optimizers.add(new BuildCFG());
-//
-//        // -------------到这里是正确的----------------
-//
+
         optimizers.add(new RemovePhi(visitor));
     }
 
