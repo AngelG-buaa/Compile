@@ -144,6 +144,29 @@ public class LocalValueNumbering extends Optimizer {
         Iterator<IRInstruction> iterator = basicBlock.getAllInstructions().iterator();
         while (iterator.hasNext()) {
             IRInstruction instruction = iterator.next();
+            if (instruction instanceof CopyInstruction) {
+                CopyInstruction c = (CopyInstruction) instruction;
+                IRValue src = c.getSourceValue();
+                c.getTargetValue().replaceAllUsesWith(src);
+                iterator.remove();
+                continue;
+            }
+            if (instruction instanceof TruncateInstruction) {
+                TruncateInstruction t = (TruncateInstruction) instruction;
+                if (t.getSourceType().toString().equals(t.getTargetType().toString())) {
+                    instruction.replaceAllUsesWith(t.getOriginalValue());
+                    iterator.remove();
+                    continue;
+                }
+            }
+            if (instruction instanceof ZeroExtendInstruction) {
+                ZeroExtendInstruction z = (ZeroExtendInstruction) instruction;
+                if (z.getSourceType().toString().equals(z.getTargetType().toString())) {
+                    instruction.replaceAllUsesWith(z.getOriginalValue());
+                    iterator.remove();
+                    continue;
+                }
+            }
             if (this.canGvnInstruction(instruction)) {
                 String hash = instruction.toString();
                 // 如果存在，则替换值
@@ -192,13 +215,31 @@ public class LocalValueNumbering extends Optimizer {
         int leftNum = ((IntegerConstant) leftValue).getConstantValue();
         int rightNum = ((IntegerConstant) rightValue).getConstantValue();
         
-        int result = switch (binOp.getOperator()) {
-            case ADD -> leftNum + rightNum;
-            case SUB -> leftNum - rightNum;
-            case MUL -> leftNum * rightNum;
-            case SDIV -> leftNum / rightNum;
-            case SREM -> leftNum % rightNum;
-        };
+        int result;
+        if (binOp.getOperator() == BinaryOperationInstruction.BinaryOperator.ADD) {
+            result = leftNum + rightNum;
+        } else if (binOp.getOperator() == BinaryOperationInstruction.BinaryOperator.SUB) {
+            result = leftNum - rightNum;
+        } else if (binOp.getOperator() == BinaryOperationInstruction.BinaryOperator.MUL) {
+            result = leftNum * rightNum;
+        } else if (binOp.getOperator() == BinaryOperationInstruction.BinaryOperator.SDIV) {
+            result = leftNum / rightNum;
+        } else if (binOp.getOperator() == BinaryOperationInstruction.BinaryOperator.SREM) {
+            result = leftNum % rightNum;
+        } else if (binOp.getOperator() == BinaryOperationInstruction.BinaryOperator.BITAND) {
+            result = leftNum & rightNum;
+        } else if (binOp.getOperator() == BinaryOperationInstruction.BinaryOperator.BITOR) {
+            result = leftNum | rightNum;
+        } else if (binOp.getOperator() == BinaryOperationInstruction.BinaryOperator.BITXOR) {
+            result = leftNum ^ rightNum;
+        } else if (binOp.getOperator() == BinaryOperationInstruction.BinaryOperator.SHL) {
+            result = leftNum << rightNum;
+        } else if (binOp.getOperator() == BinaryOperationInstruction.BinaryOperator.ASHR) {
+            result = leftNum >> rightNum;
+        } else {
+            System.err.println("Unknown operator: " + binOp.getOperator());
+            return false;
+        }
 
         IntegerConstant resultConstant = new IntegerConstant(IntegerType.I32, result);
         binOp.replaceAllUsesWith(resultConstant);
@@ -220,6 +261,7 @@ public class LocalValueNumbering extends Optimizer {
             case MUL -> this.foldElseMul(leftValue, rightValue, binOp);
             case SDIV -> this.foldElseDiv(leftValue, rightValue, binOp);
             case SREM -> this.foldElseRem(leftValue, rightValue, binOp);
+            default -> false;
         };
     }
 

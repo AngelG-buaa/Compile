@@ -16,22 +16,34 @@ import java.util.List;
  * 我这里的做法支持多维数组
  */
 public class InitVal extends BranchNode {
-    private ArrayList<Exp> exps;
+    private Exp exp;
+    private ArrayList<InitVal> initVals;
 
     public InitVal() {
         super(SynType.InitVal);
-        exps = new ArrayList<>();
+        this.initVals = new ArrayList<>();
+        this.exp = null;
     }
 
     @Override
     public void appendChild(AstNode child) {
         if (child.getNodeType() == SynType.Exp) {
-            exps.add((Exp) child);
+            this.exp = (Exp) child;
+        } else if (child.getNodeType() == SynType.InitVal) {
+            this.initVals.add((InitVal) child);
         }
         super.appendChild(child);
     }
 
-    public ArrayList<Exp> getExps() {
-        return exps;
+    public Exp getExp() {
+        return exp;
+    }
+    
+    public ArrayList<InitVal> getInitVals() {
+        return initVals;
+    }
+    
+    public boolean isLeaf() {
+        return exp != null;
     }
 }

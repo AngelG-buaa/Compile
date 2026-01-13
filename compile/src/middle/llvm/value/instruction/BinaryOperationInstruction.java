@@ -62,7 +62,12 @@ public class BinaryOperationInstruction extends IRInstruction {
         SUB("sub"),      // 减法运算
         MUL("mul"),      // 乘法运算
         SDIV("sdiv"),    // 有符号除法运算
-        SREM("srem");    // 有符号取模运算
+        SREM("srem"),    // 有符号取模运算
+        BITAND("and"),   // 按位与
+        BITOR("or"),     // 按位或
+        BITXOR("xor"),   // 按位异或
+        SHL("shl"),      // 左移
+        ASHR("ashr");    // 算术右移
         
         private final String opName;
         

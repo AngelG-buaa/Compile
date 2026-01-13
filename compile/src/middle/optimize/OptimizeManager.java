@@ -75,21 +75,21 @@ public class OptimizeManager {
         optimizers.add(new RemoveDeadBlock());
         optimizers.add(new BuildCFG());
 
-        // 2. 死代码消除
-        optimizers.add(new RemoveDeadCode());
-        optimizers.add(new BuildCFG());
-
-        // 3. 内存到寄存器优化（插入 Phi，重命名，移除 load/store）
+        // 2. 早期内存到寄存器优化（插入 Phi，重命名，移除 load/store）
         optimizers.add(new MemToReg());
         optimizers.add(new BuildCFG());
+        optimizers.add(new RemoveUnReachCode());
+        optimizers.add(new BuildCFG());
+        optimizers.add(new RemoveDeadCode());
+        optimizers.add(new BuildCFG());
 //
-        // 4. 再次删除不可达代码和死代码
+        // 3. 再次删除不可达代码和死代码
         optimizers.add(new RemoveUnReachCode());
         optimizers.add(new BuildCFG());
         optimizers.add(new RemoveDeadCode());
         optimizers.add(new BuildCFG());
 
-        // 4.5 循环不变式外提 (LICM)
+        // 4. 循环不变式外提 (LICM) + LSR
         optimizers.add(new LoopInvariantCodeMotion());
         optimizers.add(new BuildCFG());
         // 再次清理可能产生的死代码

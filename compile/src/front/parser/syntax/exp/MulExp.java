@@ -29,7 +29,12 @@ public class MulExp extends BranchNode {
     public void appendChild(AstNode child) {
         if (child.getNodeType() == SynType.MULT
         || child.getNodeType() == SynType.DIV
-        || child.getNodeType() == SynType.MOD) {
+        || child.getNodeType() == SynType.MOD
+        || child.getNodeType() == SynType.BITANDK
+        || child.getNodeType() == SynType.BITORK
+        || child.getNodeType() == SynType.BITXORK
+        || child.getNodeType() == SynType.SHLK
+        || child.getNodeType() == SynType.ASHRK) {
             operator = (TokenNode) child;
         } else if (child.getNodeType() == SynType.UnaryExp) {
             unaryExp = (UnaryExp) child;

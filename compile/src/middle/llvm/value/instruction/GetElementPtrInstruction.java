@@ -20,18 +20,43 @@ public class GetElementPtrInstruction extends IRInstruction {
     private final IRType baseType;
     
     /**
-     * 创建数组元素寻址指令 (两个索引)
-     * getelementptr baseType, baseType* base, leftIndex, rightIndex
+     * 创建通用GEP指令 (支持任意数量索引)
+     * getelementptr baseType, baseType* base, idx0, idx1, ...
      */
-    public GetElementPtrInstruction(IRValue parentBlock, int nameCounter, IRValue basePointer, 
-                                  IRValue leftIndex, IRValue rightIndex) {
-        super(parentBlock, "%gep" + nameCounter, 
-              new PointerType(((ArrayType) calculateBaseType(basePointer)).getElementType()));
-        this.indexCount = 2;
+    public GetElementPtrInstruction(IRValue parentBlock, int nameCounter, IRValue basePointer, List<IRValue> indices) {
+        super(parentBlock, "%gep" + nameCounter, calculateResultType(basePointer, indices));
+        this.indexCount = indices.size();
         this.baseType = calculateBaseType(basePointer);
         addOperand(basePointer);
-        addOperand(leftIndex);
-        addOperand(rightIndex);
+        for (IRValue idx : indices) {
+            addOperand(idx);
+        }
+    }
+
+    private static IRType calculateResultType(IRValue basePointer, List<IRValue> indices) {
+        IRType currentType = calculateBaseType(basePointer);
+        // indices[0] is pointer offset, doesn't change type (unless it's pointer arithmetic, but conceptually we are stepping through memory)
+        // Actually, GEP type calculation:
+        // GEP Ptr, Idx0, Idx1...
+        // T = Pointee(Ptr)
+        // For Idx0: result is T* (pointer arithmetic on base)
+        // For Idx1: T must be Array or Struct. T = ElementType(T).
+        // ...
+        // Finally result is T*
+        
+        // However, standard GEP logic:
+        // 1st index steps through the pointer itself.
+        // Subsequent indices step into the aggregate.
+        
+        for (int i = 1; i < indices.size(); i++) {
+            if (currentType instanceof ArrayType) {
+                currentType = ((ArrayType) currentType).getElementType();
+            } else {
+                // Struct support if needed, otherwise error
+                throw new IllegalArgumentException("Indexing into non-aggregate type: " + currentType);
+            }
+        }
+        return new PointerType(currentType);
     }
     
     /**
@@ -103,10 +128,10 @@ public class GetElementPtrInstruction extends IRInstruction {
         builder.append(leftIndex.getType()).append(" ").append(leftIndex.getName());
         
         // rightIndex (only for 2-index case)
-        if (indexCount == 2) {
+        for (int i = 2; i < indexCount + 1; i++) {
             builder.append(", ");
-            IRValue rightIndex = getOperand(2);
-            builder.append(rightIndex.getType()).append(" ").append(rightIndex.getName());
+            IRValue index = getOperand(i);
+            builder.append(index.getType()).append(" ").append(index.getName());
         }
         
         return builder.toString();

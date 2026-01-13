@@ -12,13 +12,13 @@ import front.parser.syntax.exp.ConstExp;
 public class ConstDef extends BranchNode {
     // Ident是终结符
     private TokenNode identifier;
-    private ConstExp innerExp;
+    private java.util.ArrayList<ConstExp> innerExps;
     private ConstInitVal initValue;
 
     public ConstDef() {
         super(SynType.ConstDef);
         this.identifier = null;
-        this.innerExp = null;
+        this.innerExps = new java.util.ArrayList<>();
         this.initValue = null;
     }
 
@@ -26,7 +26,7 @@ public class ConstDef extends BranchNode {
         super.appendChild(child);
 
         if (child.getNodeType() == SynType.ConstExp) {
-            this.innerExp = (ConstExp) child;
+            this.innerExps.add((ConstExp) child);
         } else if (child.getNodeType() == SynType.IDENFR) {
             this.identifier = (TokenNode) child;
         } else if (child.getNodeType() == SynType.ConstInitVal) {
@@ -43,11 +43,19 @@ public class ConstDef extends BranchNode {
     }
 
     /**
-     * 获取数组维度的常量表达式
-     * @return 常量表达式节点，如果不是数组则返回null
+     * 获取数组维度的常量表达式列表
+     * @return 常量表达式列表，如果不是数组则为空列表
+     */
+    public java.util.ArrayList<ConstExp> getConstExps() {
+        return innerExps;
+    }
+
+    /**
+     * 兼容旧接口：获取第一个维度（如果是多维，只返回第一个）
+     * @deprecated Use getConstExps() instead
      */
     public ConstExp getConstExp() {
-        return innerExp;
+        return innerExps.isEmpty() ? null : innerExps.get(0);
     }
 
     /**
@@ -63,7 +71,7 @@ public class ConstDef extends BranchNode {
      * @return 如果是数组常量返回true，否则返回false
      */
     public boolean isArray() {
-        return innerExp != null;
+        return !innerExps.isEmpty();
     }
 
 }

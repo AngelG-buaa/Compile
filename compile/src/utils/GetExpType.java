@@ -1,18 +1,13 @@
 package utils;
 
-import front.parser.syntax.AstNode;
-import front.parser.syntax.exp.AddExp;
-import front.parser.syntax.exp.Exp;
-import front.parser.syntax.exp.FuncCallUnaryExp;
-import front.parser.syntax.exp.LVal;
-import front.parser.syntax.exp.MulExp;
-import front.parser.syntax.exp.PrimaryExp;
-import front.parser.syntax.exp.PrimaryUnaryExp;
-import front.parser.syntax.exp.UnaryExp;
+import front.parser.syntax.exp.*;
 import middle.checker.symbol.FuncSymbol;
 import middle.checker.symbol.Symbol;
 import middle.checker.symbol.SymbolManager;
 import middle.checker.symbol.SymbolType;
+import front.parser.syntax.BranchNode;
+import front.parser.syntax.SynType;
+import front.parser.syntax.AstNode;
 
 import java.util.List;
 
@@ -23,14 +18,65 @@ public class GetExpType {
             return SymbolType.INT; // 默认类型
         }
 
-        // Exp → AddExp
-        AddExp addExp = exp.getAddExp();
-        if (addExp != null) {
-            return getAddExpType(addExp);
+        if (exp.getChildren().isEmpty()) {
+            return SymbolType.INT;
         }
 
-        System.out.println("something strange happened --by getExpType");
-        return SymbolType.INT; // 默认类型
+        AstNode child = exp.getChildren().get(0);
+        return dispatchType(child);
+    }
+
+    private static SymbolType dispatchType(AstNode node) {
+        if (node instanceof LOrExp) return getLOrExpType((LOrExp) node);
+        if (node instanceof LAndExp) return getLAndExpType((LAndExp) node);
+        if (node instanceof EqExp) return getEqExpType((EqExp) node);
+        if (node instanceof RelExp) return getRelExpType((RelExp) node);
+        if (node instanceof AddExp) return getAddExpType((AddExp) node);
+        if (node instanceof MulExp) return getMulExpType((MulExp) node);
+        if (node instanceof UnaryExp) return getUnaryExpType((UnaryExp) node);
+        
+        // Handle intermediate BranchNodes (BitOr, BitXor, BitAnd, Shift, Cond)
+        if (node instanceof BranchNode) {
+            BranchNode branch = (BranchNode) node;
+            // Ternary Operator: LOrExp '?' Exp ':' CondExp
+            if (node.getNodeType() == SynType.Cond) {
+                if (branch.getChildren().size() > 2 && branch.getChildren().get(2) instanceof Exp) {
+                    return getExpType((Exp) branch.getChildren().get(2));
+                }
+            }
+            
+            // If it has operators (more than 1 child), result is INT (logic/bitwise/shift op)
+            if (branch.getChildren().size() > 1) {
+                return SymbolType.INT;
+            }
+            
+            // Pass-through
+            if (!branch.getChildren().isEmpty()) {
+                return dispatchType(branch.getChildren().get(0));
+            }
+        }
+        
+        return SymbolType.INT;
+    }
+
+    private static SymbolType getLOrExpType(LOrExp node) {
+        if (node.getChildren().size() > 1) return SymbolType.INT;
+        return dispatchType(node.getChildren().get(0));
+    }
+
+    private static SymbolType getLAndExpType(LAndExp node) {
+        if (node.getChildren().size() > 1) return SymbolType.INT;
+        return dispatchType(node.getChildren().get(0));
+    }
+
+    private static SymbolType getEqExpType(EqExp node) {
+        if (node.getChildren().size() > 1) return SymbolType.INT;
+        return dispatchType(node.getChildren().get(0));
+    }
+
+    private static SymbolType getRelExpType(RelExp node) {
+        if (node.getChildren().size() > 1) return SymbolType.INT;
+        return dispatchType(node.getChildren().get(0));
     }
 
     /**

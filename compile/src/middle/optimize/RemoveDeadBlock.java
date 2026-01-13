@@ -45,7 +45,7 @@ public class RemoveDeadBlock extends Optimizer {
                 
                 while (iterator.hasNext() && count > 1) {
                     IRBasicBlock block = iterator.next();
-                    if (this.isDeadBlock(block)) {
+                    if (this.isDeadBlock(block, irFunction)) {
                         this.killBlock(block);
                         // 从函数中移除该块
                         irFunction.getBasicBlocks().remove(block);
@@ -60,7 +60,12 @@ public class RemoveDeadBlock extends Optimizer {
         }
     }
 
-    private boolean isDeadBlock(IRBasicBlock block) {
+    private boolean isDeadBlock(IRBasicBlock block, IRFunction irFunction) {
+        // 保护入口块不被删除
+        if (block == irFunction.getBasicBlocks().get(0)) {
+            return false;
+        }
+
         // 检查块内指令数。注意：block.getAllInstructions() 可能包含 Label 等，
         // 但 IRBasicBlock.instructions 通常只包含指令。
         // 空块定义：只包含一条终结指令（Jump/Branch/Ret）
@@ -146,7 +151,7 @@ public class RemoveDeadBlock extends Optimizer {
                 
                 while (iterator.hasNext()) {
                     IRBasicBlock visitBlock = iterator.next();
-                    if (this.canMergeBlock(visitBlock)) {
+                    if (this.canMergeBlock(visitBlock, irFunction)) {
                         IRBasicBlock beforeBlock = visitBlock.getPredecessors().iterator().next();
                         this.doMerge(beforeBlock, visitBlock);
                         
@@ -160,7 +165,12 @@ public class RemoveDeadBlock extends Optimizer {
         }
     }
 
-    private boolean canMergeBlock(IRBasicBlock visitBlock) {
+    private boolean canMergeBlock(IRBasicBlock visitBlock, IRFunction irFunction) {
+        // 保护入口块不被合并
+        if (visitBlock == irFunction.getBasicBlocks().get(0)) {
+            return false;
+        }
+
         // 条件1: 只有一个前驱
         if (visitBlock.getPredecessors().size() != 1) {
             return false;

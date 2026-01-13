@@ -57,8 +57,30 @@ public class TokenToNode {
                 return SynType.UNTILTK;
             case REPEATK:
                 return SynType.REPEATTK;
+            case DOK:
+                return SynType.DOTK;
+            case WHILEK:
+                return SynType.WHILETK;
             case IDENFR:
                 return SynType.IDENFR;
+            case BITANDK:
+                return SynType.BITANDK;
+            case BITORK:
+                return SynType.BITORK;
+            case BITXORK:
+                return SynType.BITXORK;
+            case SWITCHTK:
+                return SynType.SWITCHTK;
+            case CASETK:
+                return SynType.CASETK;
+            case DEFAULTTK:
+                return SynType.DEFAULTTK;
+            case GOTOTK:
+                return SynType.GOTOTK;
+            case SHLK:
+                return SynType.SHLK;
+            case ASHRK:
+                return SynType.ASHRK;
             case INTCON:
                 return SynType.INTCON;
             case STRCON:
@@ -95,6 +117,10 @@ public class TokenToNode {
                 return SynType.PLUS;
             case MINU:
                 return SynType.MINU;
+            case INC:
+                return SynType.INC;
+            case DEC:
+                return SynType.DEC;
             case PRINTFTK:
                 return SynType.PRINTFTK;
             case MULT:
@@ -133,6 +159,20 @@ public class TokenToNode {
                 return SynType.RBRACE;
             case ASSIGN:
                 return SynType.ASSIGN;
+            case PLUSASSIGN:
+                return SynType.PLUSASSIGN;
+            case MINUASSIGN:
+                return SynType.MINUASSIGN;
+            case MULTASSIGN:
+                return SynType.MULTASSIGN;
+            case DIVASSIGN:
+                return SynType.DIVASSIGN;
+            case MODASSIGN:
+                return SynType.MODASSIGN;
+            case QUESTION:
+                return SynType.QUESTION;
+            case COLON:
+                return SynType.COLON;
             case EOF:
                 return SynType.EOF;
             case ERR:

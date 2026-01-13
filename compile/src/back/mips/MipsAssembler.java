@@ -139,6 +139,11 @@ public class MipsAssembler {
                 instructions.add(new Div(left, right));
                 instructions.add(new Mfhi(dest));
                 break;
+            case BITAND: instructions.add(new And(dest, left, right)); break;
+            case BITOR: instructions.add(new Or(dest, left, right)); break;
+            case BITXOR: instructions.add(new Xor(dest, left, right)); break;
+            case SHL: instructions.add(new Sllv(dest, left, right)); break;
+            case ASHR: instructions.add(new Srav(dest, left, right)); break;
             default: break;
         }
     }
@@ -230,6 +235,11 @@ public class MipsAssembler {
     // --- 跳转与分支 ---
     protected Beq makeBeq(Reg left, Reg right, String target) {
         Beq instr = new Beq(left, right, target);
+        instructions.add(instr);
+        return instr;
+    }
+    protected Bne makeBne(Reg left, Reg right, String target) {
+        Bne instr = new Bne(left, right, target);
         instructions.add(instr);
         return instr;
     }
@@ -432,7 +442,7 @@ public class MipsAssembler {
             if (i + 1 < instructions.size() && cur instanceof Addiu && instructions.get(i + 1) instanceof MemoryM) {
                 Addiu addiu = (Addiu) cur;
                 MemoryM mem = (MemoryM) instructions.get(i + 1);
-                if (mem.getOffset() == 0 && mem.getBaseReg() == addiu.getDestination()) {
+                if (mem.getOffset() == 0 && mem.getBaseReg() == addiu.getDestination() && addiu.getDestination() != Reg.sp) {
                     int imm = addiu.getImmediate();
                     Reg base = addiu.getSource();
                     InstrM replaced;

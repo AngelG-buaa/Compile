@@ -41,12 +41,14 @@ public class Compiler {
         /**
          * 将读入的文件的内容输入到Lexer进行词法分析
          */
-        frontManager.runLexer(testCode,true);
+        // frontManager.runLexer(testCode,true);
+        frontManager.runLexer(testCode,false);
 
         /**
          * 将词法分析得到的token串输入到Parser进行语法分析
          */
         frontManager.runParser(true);
+        // frontManager.runParser(false);
 
         /**
          * 进行语义分析

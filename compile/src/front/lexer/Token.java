@@ -9,6 +9,8 @@ public class Token {
         HEXCON,
         REPEATK,
         UNTILK,
+        DOK,
+        WHILEK,
         /**
          * 自己加的，附到testCode串的最后
          * 用 ? (\uD83D)表示
@@ -39,6 +41,8 @@ public class Token {
         VOIDTK,
         PLUS,
         MINU,
+        INC,
+        DEC,
         PRINTFTK,
         MULT,
         DIV,
@@ -57,7 +61,23 @@ public class Token {
         RBRACK,
         LBRACE,
         RBRACE,
-        ASSIGN
+        ASSIGN,
+        PLUSASSIGN,
+        MINUASSIGN,
+        MULTASSIGN,
+        DIVASSIGN,
+        MODASSIGN,
+        QUESTION,
+        COLON,
+        SHLK,
+        ASHRK,
+        BITORK,
+        BITANDK,
+        BITXORK,
+        SWITCHTK,
+        CASETK,
+        DEFAULTTK,
+        GOTOTK,
     }
 
     public Token(String tokenContent, TokenType tokenType, int lineNum) {

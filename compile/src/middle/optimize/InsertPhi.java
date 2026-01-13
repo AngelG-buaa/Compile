@@ -81,8 +81,8 @@ public class InsertPhi {
     private final IRBasicBlock entryBlock;
     private final HashSet<IRInstruction> defineInstrs;
     private final HashSet<IRInstruction> useInstrs;
-    private final ArrayList<IRBasicBlock> defineBlocks;
-    private final ArrayList<IRBasicBlock> useBlocks;
+    private final LinkedHashSet<IRBasicBlock> defineBlocks;
+    private final LinkedHashSet<IRBasicBlock> useBlocks;
     private Stack<IRValue> valueStack;
     // 该 alloca 对应的实际值类型（指针所指向的类型），用于类型一致的默认值
     private final IRType targetValueType;
@@ -92,8 +92,8 @@ public class InsertPhi {
         this.entryBlock = entryBlock;
         this.defineInstrs = new HashSet<>();
         this.useInstrs = new HashSet<>();
-        this.defineBlocks = new ArrayList<>();
-        this.useBlocks = new ArrayList<>();
+        this.defineBlocks = new LinkedHashSet<>();
+        this.useBlocks = new LinkedHashSet<>();
         this.valueStack = new Stack<>();
         this.targetValueType = ((PointerType) this.allocaInstruction.getType()).getPointeeType();
     }
@@ -108,6 +108,7 @@ public class InsertPhi {
         this.insertPhiToBlock();
         // 通过DFS进行重命名，同时将相关的allocate, store, load指令删除
         this.convertLoadStore(this.entryBlock);
+        this.pruneTrivialPhis(this.entryBlock);
     }
 
     /**
@@ -139,9 +140,7 @@ public class InsertPhi {
     private void addDefineInstr(IRInstruction instr) {
         this.defineInstrs.add(instr);
         IRBasicBlock parentBlock = (IRBasicBlock) instr.getContainer();
-        if (!this.defineBlocks.contains(parentBlock)) {
-            this.defineBlocks.add(parentBlock);
-        }
+        this.defineBlocks.add(parentBlock);
     }
 
     /**
@@ -150,9 +149,7 @@ public class InsertPhi {
     private void addUseInstr(IRInstruction instr) {
         this.useInstrs.add(instr);
         IRBasicBlock parentBlock = (IRBasicBlock) instr.getContainer();
-        if (!this.useBlocks.contains(parentBlock)) {
-            this.useBlocks.add(parentBlock);
-        }
+        this.useBlocks.add(parentBlock);
     }
 
     /**
@@ -191,6 +188,9 @@ public class InsertPhi {
      * 在指定基本块插入Phi指令
      */
     private void insertPhiInstr(IRBasicBlock irBasicBlock) {
+        if (irBasicBlock.getPredecessors().size() <= 1) {
+            return;
+        }
         // 获取alloca的目标类型
         PointerType pointerType = (PointerType) this.allocaInstruction.getType();
 
@@ -235,26 +235,35 @@ public class InsertPhi {
      */
     private void removeBlockLoadStore(IRBasicBlock visitBlock) {
         Iterator<IRInstruction> iterator = visitBlock.getAllInstructions().iterator();
+        IRValue current = null;
         while (iterator.hasNext()) {
             IRInstruction instr = iterator.next();
-            // store
+            // store（仅保留最后一次）
             if (instr instanceof StoreInstruction storeInstr && this.defineInstrs.contains(instr)) {
-                this.valueStack.push(storeInstr.getValueOperand());
+                current = storeInstr.getValueOperand();
                 iterator.remove();
+                continue;
             }
-            // load
-            else if (!(instr instanceof PhiInstruction) && this.useInstrs.contains(instr)) {
-                instr.replaceAllUsesWith(this.peekVisibleForBlock(visitBlock));
+            // load（使用当前可见值或最近一次store的值）
+            if (!(instr instanceof PhiInstruction) && this.useInstrs.contains(instr)) {
+                IRValue replacement = current != null ? current : this.peekVisibleForBlock(visitBlock);
+                instr.replaceAllUsesWith(replacement);
                 iterator.remove();
+                continue;
             }
-            // phi
-            else if (instr instanceof PhiInstruction && this.defineInstrs.contains(instr)) {
+            // phi（更新当前值为phi）
+            if (instr instanceof PhiInstruction && this.defineInstrs.contains(instr)) {
+                current = instr;
                 this.valueStack.push(instr);
+                continue;
             }
             // 当前分析的allocate：使用mem2reg后不需要allocate
-            else if (instr == this.allocaInstruction) {
+            if (instr == this.allocaInstruction) {
                 iterator.remove();
             }
+        }
+        if (current != null) {
+            this.valueStack.push(current);
         }
     }
 
@@ -299,6 +308,50 @@ public class InsertPhi {
         }
         // 栈为空时，返回与 alloca 对应类型一致的零常量，避免类型不匹配
         return defaultZeroForTargetType();
+    }
+
+    private void pruneTrivialPhis(IRBasicBlock startBlock) {
+        HashSet<IRBasicBlock> visited = new HashSet<>();
+        ArrayDeque<IRBasicBlock> q = new ArrayDeque<>();
+        visited.add(startBlock);
+        q.add(startBlock);
+        while (!q.isEmpty()) {
+            IRBasicBlock b = q.poll();
+            Iterator<IRInstruction> it = b.getAllInstructions().iterator();
+            while (it.hasNext()) {
+                IRInstruction instr = it.next();
+                if (!(instr instanceof PhiInstruction)) {
+                    break;
+                }
+                if (!this.useInstrs.contains(instr)) {
+                    continue;
+                }
+                PhiInstruction phi = (PhiInstruction) instr;
+                List<IRBasicBlock> preds = phi.getPredecessorBlocks();
+                if (preds.isEmpty()) {
+                    it.remove();
+                    continue;
+                }
+                IRValue first = phi.getIncomingValue(preds.get(0));
+                boolean same = true;
+                for (int i = 1; i < preds.size(); i++) {
+                    IRValue v = phi.getIncomingValue(preds.get(i));
+                    if (v != first) {
+                        same = false;
+                        break;
+                    }
+                }
+                if (same && first != null) {
+                    phi.replaceAllUsesWith(first);
+                    it.remove();
+                }
+            }
+            for (IRBasicBlock s : b.getSuccessors()) {
+                if (visited.add(s)) {
+                    q.add(s);
+                }
+            }
+        }
     }
 
     private IRValue defaultZeroForTargetType() {

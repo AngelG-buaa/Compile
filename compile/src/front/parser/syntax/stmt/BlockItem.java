@@ -23,7 +23,7 @@ public class BlockItem extends BranchNode {
     public void appendChild(AstNode child) {
         if (child.getNodeType() == SynType.Decl) {
             decl = (Decl) child;
-        } else if (child.getNodeType() == SynType.Stmt) {
+        } else if (child instanceof Stmt) {
             stmt = (Stmt) child;
         }
 

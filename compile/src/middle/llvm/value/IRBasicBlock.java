@@ -183,6 +183,16 @@ public class IRBasicBlock extends IRValue {
     public IRInstruction getLastInstruction() {
         return instructions.isEmpty() ? null : instructions.getLast();
     }
+
+    /**
+     * 判断基本块是否已终止（以终结指令结尾）
+     * 
+     * @return 如果最后一条指令是终结指令则返回true，否则（包括空块）返回false
+     */
+    public boolean isTerminated() {
+        IRInstruction last = getLastInstruction();
+        return last != null && last.isTerminatorInstruction();
+    }
     
     /**
      * 获取第一条指令

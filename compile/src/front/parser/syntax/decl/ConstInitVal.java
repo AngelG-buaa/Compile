@@ -15,21 +15,33 @@ import java.util.List;
  * 2.一维数组初值
  */
 public class ConstInitVal extends BranchNode {
-    private ArrayList<ConstExp> exps;
+    private ConstExp constExp;
+    private ArrayList<ConstInitVal> initVals;
 
     public ConstInitVal() {
         super(SynType.ConstInitVal);
-        this.exps = new ArrayList<>();
+        this.initVals = new ArrayList<>();
+        this.constExp = null;
     }
 
     public void appendChild(AstNode child) {
         if (child.getNodeType() == SynType.ConstExp) {
-            this.exps.add((ConstExp) child);
+            this.constExp = (ConstExp) child;
+        } else if (child.getNodeType() == SynType.ConstInitVal) {
+            this.initVals.add((ConstInitVal) child);
         }
         super.appendChild(child);
     }
 
-    public ArrayList<ConstExp> getExps() {
-        return exps;
+    public ConstExp getConstExp() {
+        return constExp;
+    }
+
+    public ArrayList<ConstInitVal> getInitVals() {
+        return initVals;
+    }
+    
+    public boolean isLeaf() {
+        return constExp != null;
     }
 }

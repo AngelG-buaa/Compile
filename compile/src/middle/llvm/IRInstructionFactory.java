@@ -267,8 +267,12 @@ public class IRInstructionFactory {
 
         // 确保索引是i32类型
         IRValue index = new IntegerConstant(IntegerType.I32,0);
+        
+        List<IRValue> indices = new ArrayList<>();
+        indices.add(index);
+        indices.add(index);
 
-        GetElementPtrInstruction gep = new GetElementPtrInstruction(currentBasicBlock, getNextNameCounter(), basePointer, index, index);
+        GetElementPtrInstruction gep = new GetElementPtrInstruction(currentBasicBlock, getNextNameCounter(), basePointer, indices);
         currentBasicBlock.addInstructionToTail(gep);
         return gep;
     }
@@ -293,23 +297,23 @@ public class IRInstructionFactory {
     }
     
     /**
-     * getelementptr inbounds <类型>, <类型>* basePointer, i32 firstIndex, i32 secondIndex
-     * "类型"是数组，"basePointer"是数组名，将数组类型的某元素地址转为指针
+     * getelementptr inbounds <类型>, <类型>* basePointer, i32 idx0, i32 idx1, ...
+     * 通用GEP指令
      * 
      * @param basePointer 基础指针
-     * @param firstIndex 第一个索引（通常为0）
-     * @param secondIndex 第二个索引
+     * @param indices 索引列表
      * @return 创建的GEP指令
      */
-    public GetElementPtrInstruction createGetElementPtr(IRValue basePointer, IRValue firstIndex, IRValue secondIndex) {
+    public GetElementPtrInstruction createGetElementPtr(IRValue basePointer, List<IRValue> indices) {
         validateCurrentBasicBlock();
         
-        // 确保索引都是i32类型
-        IRValue adjustedFirstIndex = ensureIntegerTypeValue(firstIndex, IntegerType.I32);
-        IRValue adjustedSecondIndex = ensureIntegerTypeValue(secondIndex, IntegerType.I32);
+        List<IRValue> adjustedIndices = new ArrayList<>();
+        for (IRValue idx : indices) {
+            adjustedIndices.add(ensureIntegerTypeValue(idx, IntegerType.I32));
+        }
         
         GetElementPtrInstruction gep = new GetElementPtrInstruction(currentBasicBlock, getNextNameCounter(), 
-                basePointer, adjustedFirstIndex, adjustedSecondIndex);
+                basePointer, adjustedIndices);
         currentBasicBlock.addInstructionToTail(gep);
         return gep;
     }

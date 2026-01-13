@@ -1,6 +1,7 @@
 package middle.llvm.value.constant;
 
 import middle.llvm.type.ArrayType;
+import middle.llvm.type.IRType;
 import middle.llvm.type.IntegerType;
 
 import java.util.ArrayList;
@@ -147,7 +148,26 @@ public class ArrayConstant extends IRConstant {
     public IntegerConstant getElementConstant(int index) {
         if (index >= 0 && index < elementValues.size()) {
             ArrayType arrayType = (ArrayType) getType();
-            return new IntegerConstant(arrayType.getElementType(), elementValues.get(index));
+            // 确保elementType是IntegerType，如果是ArrayType（多维数组），这里可能不适用，
+            // 但目前的实现是展平的elementValues，所以可能是合理的，取决于elementType是否真的是基础类型。
+            // 实际上ArrayType的构造函数允许elementType是IRType。
+            // 如果elementType是IntegerType，可以强制转换。
+            if (arrayType.getElementType() instanceof IntegerType) {
+                return new IntegerConstant((IntegerType) arrayType.getElementType(), elementValues.get(index));
+            } else {
+                // 如果是多维数组，这里应该怎么做？
+                // 目前elementValues是扁平化的整数列表。
+                // 如果是多维数组，getElementType()返回的是子数组类型。
+                // 那么我们无法创建一个IntegerConstant(ArrayType, val)。
+                // 我们应该递归获取基础类型。
+                IRType baseType = arrayType.getElementType();
+                while (baseType instanceof ArrayType) {
+                    baseType = ((ArrayType) baseType).getElementType();
+                }
+                if (baseType instanceof IntegerType) {
+                    return new IntegerConstant((IntegerType) baseType, elementValues.get(index));
+                }
+            }
         }
         return null;
     }
@@ -176,13 +196,57 @@ public class ArrayConstant extends IRConstant {
         builder.append("[");
         
         ArrayType arrayType = (ArrayType) getType();
-        IntegerType elementType = arrayType.getElementType();
+        // 修正：elementType可能是ArrayType，如果是多维数组
+        IRType elementType = arrayType.getElementType();
         
-        // 输出每个元素：类型 + 值
-        for (int i = 0; i < elementValues.size(); i++) {
-            builder.append(elementType.toString()).append(" ").append(elementValues.get(i));
-            if (i < elementValues.size() - 1) {
-                builder.append(", ");
+        // 如果是多维数组，我们需要递归构建字符串，还是说elementValues是扁平的？
+        // ArrayConstant的设计似乎是基于扁平的elementValues。
+        // 但是LLVM IR中多维数组必须是嵌套的结构：[2 x [2 x i32]] [[2 x i32] [i32 1, i32 2], [2 x i32] [i32 3, i32 4]]
+        // 如果我们这里只输出扁平列表，那就是错的。
+        
+        // 必须根据类型结构重构数据。
+        if (elementType instanceof ArrayType) {
+            // 这是一个多维数组的层级
+            ArrayType subArrayType = (ArrayType) elementType;
+            int subLength = subArrayType.getArrayLenth(); // 第一维长度？不，是子元素的长度
+            // arrayType = [M x SubType]
+            // elementValues has M * sizeof(SubType) items.
+            
+            // 我们需要把 elementValues 切分成 M 个块，每个块用于构建一个子 ArrayConstant
+            // 这是一个递归过程。
+            // 但是我们并没有存储子 ArrayConstant 对象，只存储了扁平的 int list。
+            // 所以我们需要动态生成子 ArrayConstant 的字符串表示。
+            
+            // 计算子元素（也是数组）包含的基础元素个数
+            int subElementCount = 1;
+            IRType temp = subArrayType;
+            while (temp instanceof ArrayType) {
+                subElementCount *= ((ArrayType) temp).getArrayLenth();
+                temp = ((ArrayType) temp).getElementType();
+            }
+            
+            int currentLength = arrayType.getArrayLenth();
+            for (int i = 0; i < currentLength; i++) {
+                // 提取子列表
+                int start = i * subElementCount;
+                int end = start + subElementCount;
+                List<Integer> subList = elementValues.subList(start, end);
+                
+                // 递归创建子常量并获取字符串
+                ArrayConstant subConst = new ArrayConstant(subArrayType, subList);
+                builder.append(subArrayType.toString()).append(" ").append(subConst.toString());
+                
+                if (i < currentLength - 1) {
+                    builder.append(", ");
+                }
+            }
+        } else {
+            // 基础类型数组 (i32, i8)
+            for (int i = 0; i < elementValues.size(); i++) {
+                builder.append(elementType.toString()).append(" ").append(elementValues.get(i));
+                if (i < elementValues.size() - 1) {
+                    builder.append(", ");
+                }
             }
         }
         

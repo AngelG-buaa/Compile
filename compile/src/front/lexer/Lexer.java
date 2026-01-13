@@ -37,6 +37,13 @@ public class Lexer {
         KEYWORDS.put("printf", Token.TokenType.PRINTFTK);
         KEYWORDS.put("repeat", Token.TokenType.REPEATK);
         KEYWORDS.put("until", Token.TokenType.UNTILK);
+        KEYWORDS.put("do", Token.TokenType.DOK);
+        KEYWORDS.put("while", Token.TokenType.WHILEK);
+        KEYWORDS.put("bitand", Token.TokenType.BITANDK);
+        KEYWORDS.put("switch", Token.TokenType.SWITCHTK);
+        KEYWORDS.put("case", Token.TokenType.CASETK);
+        KEYWORDS.put("default", Token.TokenType.DEFAULTTK);
+        KEYWORDS.put("goto", Token.TokenType.GOTOTK);
     }
 
     public void init(String sourceCode) {
@@ -261,28 +268,62 @@ public class Lexer {
 
         switch (ch) {
             case '+':
-                addToken("+", Token.TokenType.PLUS);
-                advance();
+                if (nextChar == '+') {
+                    addToken("++", Token.TokenType.INC);
+                    advance(2);
+                } else if (nextChar == '=') {
+                    addToken("+=", Token.TokenType.PLUSASSIGN);
+                    advance(2);
+                } else {
+                    addToken("+", Token.TokenType.PLUS);
+                    advance();
+                }
                 break;
             case '-':
-                addToken("-", Token.TokenType.MINU);
-                advance();
+                if (nextChar == '-') {
+                    addToken("--", Token.TokenType.DEC);
+                    advance(2);
+                } else if (nextChar == '=') {
+                    addToken("-=", Token.TokenType.MINUASSIGN);
+                    advance(2);
+                } else {
+                    addToken("-", Token.TokenType.MINU);
+                    advance();
+                }
                 break;
             case '*':
-                addToken("*", Token.TokenType.MULT);
-                advance();
+                if (nextChar == '=') {
+                    addToken("*=", Token.TokenType.MULTASSIGN);
+                    advance(2);
+                } else {
+                    addToken("*", Token.TokenType.MULT);
+                    advance();
+                }
                 break;
             case '/':
-                addToken("/", Token.TokenType.DIV);
-                advance();
+                if (nextChar == '=') {
+                    addToken("/=", Token.TokenType.DIVASSIGN);
+                    advance(2);
+                } else {
+                    addToken("/", Token.TokenType.DIV);
+                    advance();
+                }
                 break;
             case '%':
-                addToken("%", Token.TokenType.MOD);
-                advance();
+                if (nextChar == '=') {
+                    addToken("%=", Token.TokenType.MODASSIGN);
+                    advance(2);
+                } else {
+                    addToken("%", Token.TokenType.MOD);
+                    advance();
+                }
                 break;
             case '<':
                 if (nextChar == '=') {
                     addToken("<=", Token.TokenType.LEQ);
+                    advance(2);
+                } else if (nextChar == '<') {
+                    addToken("<<", Token.TokenType.SHLK);
                     advance(2);
                 } else {
                     addToken("<", Token.TokenType.LSS);
@@ -292,6 +333,9 @@ public class Lexer {
             case '>':
                 if (nextChar == '=') {
                     addToken(">=", Token.TokenType.GEQ);
+                    advance(2);
+                } else if (nextChar == '>') {
+                    addToken(">>", Token.TokenType.ASHRK);
                     advance(2);
                 } else {
                     addToken(">", Token.TokenType.GRE);
@@ -321,7 +365,8 @@ public class Lexer {
                     addToken("&&", Token.TokenType.AND);
                     advance(2);
                 } else {
-                    handleIllegalCharacter();
+                    addToken("&", Token.TokenType.BITANDK);
+                    advance();
                 }
                 break;
             case '|':
@@ -329,8 +374,13 @@ public class Lexer {
                     addToken("||", Token.TokenType.OR);
                     advance(2);
                 } else {
-                    handleIllegalCharacter();
+                    addToken("|", Token.TokenType.BITORK);
+                    advance();
                 }
+                break;
+            case '^':
+                addToken("^", Token.TokenType.BITXORK);
+                advance();
                 break;
             default:
                 handleIllegalCharacter();
@@ -366,6 +416,12 @@ public class Lexer {
             case '}':
                 addToken("}", Token.TokenType.RBRACE);
                 break;
+            case '?':
+                addToken("?", Token.TokenType.QUESTION);
+                break;
+            case ':':
+                addToken(":", Token.TokenType.COLON);
+                break;
             default:
                 handleIllegalCharacter();
                 return;
@@ -375,12 +431,13 @@ public class Lexer {
 
     private boolean isOperatorStart(char ch) {
         return ch == '+' || ch == '-' || ch == '*' || ch == '/' || ch == '%' ||
-                ch == '<' || ch == '>' || ch == '=' || ch == '!' || ch == '&' || ch == '|';
+                ch == '<' || ch == '>' || ch == '=' || ch == '!' || ch == '&' || ch == '|' || ch == '^';
     }
 
     private boolean isPunctuation(char ch) {
         return ch == ';' || ch == ',' || ch == '(' || ch == ')' ||
-                ch == '[' || ch == ']' || ch == '{' || ch == '}';
+                ch == '[' || ch == ']' || ch == '{' || ch == '}' ||
+                ch == '?' || ch == ':';
     }
 
     private void handleIllegalCharacter() {

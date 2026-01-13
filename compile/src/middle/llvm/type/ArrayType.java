@@ -22,9 +22,9 @@ public class ArrayType extends IRType {
     
     /**
      * 数组元素的类型
-     * 目前支持IntegerType（i8, i32等）
+     * 支持IntegerType或ArrayType（多维数组）
      */
-    private final IntegerType elementType;
+    private final IRType elementType;
     
     /**
      * 数组的长度（元素个数）
@@ -38,7 +38,7 @@ public class ArrayType extends IRType {
      * @param arrayLength 数组长度
      */
     public ArrayType(IRType elementType, int arrayLength) {
-        this.elementType = (IntegerType) elementType;
+        this.elementType = elementType;
         this.arrayLength = arrayLength;
     }
     
@@ -47,7 +47,7 @@ public class ArrayType extends IRType {
      * 
      * @return 元素类型
      */
-    public IntegerType getElementType() {
+    public IRType getElementType() {
         return elementType;
     }
     
@@ -74,7 +74,7 @@ public class ArrayType extends IRType {
      * @return 如果元素类型是i8返回true
      */
     public boolean isCharArray() {
-        return elementType.isByteType();
+        return elementType instanceof IntegerType && ((IntegerType)elementType).isByteType();
     }
     
     @Override

@@ -6,6 +6,8 @@ import middle.llvm.value.IRFunction;
 import middle.llvm.value.IRValue;
 import middle.llvm.value.instruction.*;
 import middle.llvm.value.constant.IRConstant;
+import middle.llvm.value.constant.IntegerConstant;
+import middle.llvm.type.IntegerType;
 
 import java.util.*;
 
@@ -75,7 +77,6 @@ public class LoopInvariantCodeMotion extends Optimizer {
                 }
             }
         }
-        
         return changed;
     }
 
@@ -304,12 +305,18 @@ public class LoopInvariantCodeMotion extends Optimizer {
         // 允许移动的指令
         if (instr instanceof BinaryOperationInstruction) {
             BinaryOperationInstruction binOp = (BinaryOperationInstruction) instr;
-            // 排除除法和取模，除非除数是常量非零（简化起见先排除所有）
-            // 实际上，如果除数是不变式且非零，也可以移动。
-            // 但为了安全，先排除。
             BinaryOperationInstruction.BinaryOperator op = binOp.getOperator();
-            return op != BinaryOperationInstruction.BinaryOperator.SDIV && 
-                   op != BinaryOperationInstruction.BinaryOperator.SREM;
+            if (op == BinaryOperationInstruction.BinaryOperator.SDIV || op == BinaryOperationInstruction.BinaryOperator.SREM) {
+                IRValue rhs = binOp.getRightOperand();
+                if (rhs instanceof IRConstant) {
+                    if (rhs instanceof middle.llvm.value.constant.IntegerConstant) {
+                        return ((middle.llvm.value.constant.IntegerConstant) rhs).getConstantValue() != 0;
+                    }
+                    return true; // 其他常量类型视为安全
+                }
+                return false;
+            }
+            return true;
         }
         
         return instr instanceof CompareInstruction ||
@@ -364,6 +371,27 @@ public class LoopInvariantCodeMotion extends Optimizer {
         
         // 3. 更新 instr 的 parent
         instr.setContainer(preHeader);
+    }
+
+
+    private Set<IRInstruction> collectDefined(Loop loop) {
+        Set<IRInstruction> defined = new HashSet<>();
+        for (IRBasicBlock b : loop.blocks) {
+            defined.addAll(b.getAllInstructions());
+        }
+        return defined;
+    }
+
+    private void insertBeforeTerminator(IRBasicBlock block, IRInstruction instr) {
+        IRInstruction terminator = block.getLastInstruction();
+        if (terminator != null && terminator.isTerminatorInstruction()) {
+            block.getAllInstructions().removeLast();
+            block.addInstructionToTail(instr);
+            block.addInstructionToTail(terminator);
+        } else {
+            block.addInstructionToTail(instr);
+        }
+        instr.setContainer(block);
     }
 
     @Override

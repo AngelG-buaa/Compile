@@ -11,6 +11,7 @@ import middle.llvm.value.*;
 import middle.llvm.value.constant.IRConstant;
 import middle.llvm.value.constant.IntegerConstant;
 import middle.llvm.value.instruction.*;
+import middle.llvm.UseDefChain;
 import utils.Config;
 
 import java.util.ArrayList;
@@ -31,7 +32,11 @@ import java.util.Set;
  *   <li>管理寄存器分配和栈帧布局</li>
  * </ul>
  */
-public class MipsCodeGenerator extends MipsAssembler {
+ public class MipsCodeGenerator extends MipsAssembler {
+    private final Set<CompareInstruction> deferredCmps = new HashSet<>();
+
+    // 记录 alloca 指令申请的内存空间在栈帧中的偏移 (相对于新 SP)
+    private final Map<AllocaInstruction, Integer> allocaContentOffsets = new HashMap<>();
 
     private static class Holder {
         private static final MipsCodeGenerator INSTANCE = new MipsCodeGenerator();
@@ -127,19 +132,168 @@ public class MipsCodeGenerator extends MipsAssembler {
      */
     protected void generateFunctionCode(IRFunction func) {
         beginFunction(func);
+        deferredCmps.clear();
 
-        // 初始化寄存器映射 (来自 RegAlloca 的 $t 寄存器分配)
+        // 1. [关键] 清空所有映射表，防止残留数据影响当前函数
+        this.valRegs.clear();
+        this.valOffsets.clear();
+        this.allocaContentOffsets.clear();
+
+        // 加载寄存器分配结果
         if (func.getValue2reg() != null) {
-            this.valRegs = new HashMap<>(func.getValue2reg());
+            this.valRegs.putAll(func.getValue2reg());
         }
 
-        handleParameters(func);
-        preAllocateStack(func);
+        // 2. 预扫描：计算栈帧大小并分配偏移量
+        int frameSize = preScanAndAllocStack(func);
 
+        // 3. 函数序言：分配栈空间
+        if (frameSize > 0) {
+            makeAddiu(Reg.sp, Reg.sp, -frameSize);
+        }
+
+        // 4. 保存参数到栈
+        storeParametersToStack(func);
+
+        // 5. 生成函数体
         for (IRBasicBlock bb : func.getBasicBlocks()) {
             makeLabel(bb.getName().substring(1));
             for (IRInstruction instr : bb.getAllInstructions()) {
                 dispatchInstruction(instr);
+            }
+        }
+    }
+
+    /**
+     * 预扫描栈空间并分配偏移量
+     * <p>修复：现在包含 alloca 的内容空间计算</p>
+     * @param func 函数
+     * @return 对齐后的总帧大小
+     */
+    private int preScanAndAllocStack(IRFunction func) {
+        // 使用临时 Map 记录偏移，最后统一写入父类 valOffsets，避免干扰
+        Map<IRValue, Integer> tempValOffsets = new HashMap<>();
+        int tempOffset = 0;
+
+        // 1. 参数 Shadow Space
+        List<IRFunctionParameter> params = func.getParameters();
+        for (int i = 0; i < params.size() && i < 4; i++) {
+            IRFunctionParameter param = params.get(i);
+            int size = param.getType().getByteSize();
+            int align = (param.getType() == IntegerType.I8) ? 1 : 4;
+
+            tempOffset -= size;
+            while (tempOffset % align != 0) tempOffset--;
+
+            tempValOffsets.put(param, tempOffset);
+        }
+
+        // 2. 遍历所有指令分配空间
+        for (IRInstruction instr : func.getAllInstructions()) {
+            // A. Alloca 指令的内容空间 (数组/结构体实体)
+            if (instr instanceof AllocaInstruction) {
+                AllocaInstruction alloca = (AllocaInstruction) instr;
+                IRType pointee = ((PointerType) alloca.getType()).getPointeeType();
+                int size = pointee.getByteSize();
+                int align = 4; // 默认按字对齐
+
+                tempOffset -= size;
+                while (tempOffset % align != 0) tempOffset--;
+
+                allocaContentOffsets.put(alloca, tempOffset);
+            }
+
+            // B. 处理 CopyInstruction 的 Target
+            // Copy 指令本身通常不产生值，而是给 Target 赋值
+            if (instr instanceof CopyInstruction) {
+                IRValue target = ((CopyInstruction) instr).getTargetValue();
+                // 如果 Target 未分配寄存器且未分配栈槽，则分配
+                if (!valRegs.containsKey(target) && !tempValOffsets.containsKey(target)) {
+                    int size = target.getType().getByteSize();
+                    int align = (target.getType() == IntegerType.I8) ? 1 : 4;
+
+                    tempOffset -= size;
+                    while (tempOffset % align != 0) tempOffset--;
+
+                    tempValOffsets.put(target, tempOffset);
+                }
+                continue; // Copy 指令本身不需要栈槽，处理完 Target 后跳过
+            }
+
+            // C. 通用指令 Spill Slots (包括 Call, Gep, BinaryOp 等)
+            // 如果指令有返回值(非Void)，且未分配寄存器，则必须分配栈槽
+            if (!(instr.getType() instanceof VoidType) && !valRegs.containsKey(instr)) {
+                // 双重检查：确保没有重复分配
+                if (!tempValOffsets.containsKey(instr)) {
+                    int size = instr.getType().getByteSize();
+                    int align = (instr.getType() == IntegerType.I8) ? 1 : 4;
+
+                    tempOffset -= size;
+                    while (tempOffset % align != 0) tempOffset--;
+
+                    tempValOffsets.put(instr, tempOffset);
+                }
+            }
+        }
+
+        // 对齐总帧大小
+        int totalSize = -tempOffset;
+        if (totalSize % 8 != 0) {
+            totalSize += (8 - (totalSize % 8));
+        }
+
+        // 3. 修正偏移量并写入全局 Map
+        // 将相对于 0 的负偏移转换为相对于新 SP 的正偏移
+        for (Map.Entry<IRValue, Integer> entry : tempValOffsets.entrySet()) {
+            putOffset(entry.getKey(), entry.getValue() + totalSize);
+        }
+
+        for (Map.Entry<AllocaInstruction, Integer> entry : allocaContentOffsets.entrySet()) {
+            entry.setValue(entry.getValue() + totalSize);
+        }
+
+        // 4. 处理栈传递的参数 (Caller 栈帧部分)
+        for (int i = 4; i < params.size(); i++) {
+            IRFunctionParameter param = params.get(i);
+            int callerOffset = totalSize + (i - 4) * 4;
+            putOffset(param, callerOffset);
+        }
+
+        this.currentFrameSize = totalSize;
+        return totalSize;
+    }
+
+    // 新增字段记录当前函数帧大小
+    private int currentFrameSize = 0;
+
+    /**
+     * 将参数值存储到预分配的栈空间
+     */
+    private void storeParametersToStack(IRFunction func) {
+        List<IRFunctionParameter> params = func.getParameters();
+        for (int i = 0; i < params.size(); i++) {
+            IRFunctionParameter param = params.get(i);
+
+            if (i < 4) {
+                // 将 $a0-$a3 落盘到栈 (Shadow Space)
+                // 此时 findOffset 返回的是基于当前 SP 的正偏移
+                Reg argReg = Reg.getArgReg(i);
+                int offset = findOffset(param);
+                int align = (param.getType() == IntegerType.I8) ? 1 : 4;
+                makeStore(align, argReg, offset, Reg.sp);
+
+                // 如果该参数被分配了其他寄存器 (如 $s0)，搬运过去
+                Reg allocatedReg = findReg(param);
+                if (allocatedReg != null && allocatedReg != argReg) {
+                    makeMove(allocatedReg, argReg);
+                }
+            } else {
+                // 栈传递的参数，如果有分配寄存器，需从栈加载到寄存器
+                Reg allocatedReg = findReg(param);
+                if (allocatedReg != null) {
+                    // Load from stack (offset is relative to current SP)
+                    makeLoad(4, allocatedReg, findOffset(param), Reg.sp);
+                }
             }
         }
     }
@@ -242,7 +396,15 @@ public class MipsCodeGenerator extends MipsAssembler {
         else if (instr instanceof AllocaInstruction) mapAlloca((AllocaInstruction) instr);
         else if (instr instanceof CallInstruction) mapCall((CallInstruction) instr);
         else if (instr instanceof GetElementPtrInstruction) mapGep((GetElementPtrInstruction) instr);
-        else if (instr instanceof CompareInstruction) mapIcmp((CompareInstruction) instr);
+        else if (instr instanceof CompareInstruction) {
+            CompareInstruction cmp = (CompareInstruction) instr;
+            List<UseDefChain> uses = cmp.getUseList();
+            if (uses.size() == 1 && uses.get(0).user() instanceof BranchInstruction) {
+                deferredCmps.add(cmp);
+                return;
+            }
+            mapIcmp(cmp);
+        }
         else if (instr instanceof ReturnInstruction) mapRet((ReturnInstruction) instr);
         else if (instr instanceof TruncateInstruction) mapTrunc((TruncateInstruction) instr);
         else if (instr instanceof CopyInstruction) mapCopy((CopyInstruction) instr);
@@ -299,6 +461,11 @@ public class MipsCodeGenerator extends MipsAssembler {
                 case MUL: res = v0 * v1; break;
                 case SDIV: res = v1 != 0 ? (v0 / v1) : 0; break;
                 case SREM: res = v1 != 0 ? (v0 % v1) : 0; break;
+                case BITAND: res = v0 & v1; break;
+                case BITOR: res = v0 | v1; break;
+                case BITXOR: res = v0 ^ v1; break;
+                case SHL: res = v0 << v1; break;
+                case ASHR: res = v0 >> v1; break;
                 default: break;
             }
             // 双常量直接输出立即数，目标在寄存器或栈分别处理
@@ -539,35 +706,28 @@ public class MipsCodeGenerator extends MipsAssembler {
      * @param alloca Alloca 指令
      */
     public void mapAlloca(AllocaInstruction alloca) {
-        IRType pointee = ((PointerType) alloca.getType()).getPointeeType();
-        int size = pointee.getByteSize();
-        // 根据被分配类型决定对齐
-        int align = (pointee == IntegerType.I8) ? 1 : 4;
-
-        // 运行时在栈上开辟空间 (移动 currentOffset)
-        subAlign(size, align);
-
-        // Alloca 指令本身返回的是地址(指针)，这个地址值(offset)需要存起来
-        // 该地址是相对于当前函数栈底(SP)的动态偏移
+        // 获取内容偏移 (已修正为正值)
+        Integer offset = allocaContentOffsets.get(alloca);
         Reg target = findReg(alloca);
-        // 优化：使用 addiu 直接计算 SP + 常量偏移，避免 li + addu 两条指令
-        // 安全性：addiu 立即数需在 16 位有符号范围内，否则退回 li+addu
-        boolean fit16 = currentOffset >= -32768 && currentOffset <= 32767;
+
+        // 计算地址: SP + offset
         if (target != null) {
-            if (fit16) {
-                makeAddiu(target, Reg.sp, currentOffset).setNote(new Note(alloca));
+            if (offset >= -32768 && offset <= 32767) {
+                makeAddiu(target, Reg.sp, offset).setNote(new Note(alloca));
             } else {
-                makeLi(target, currentOffset).setNote(new Note(alloca));
+                makeLi(target, offset).setNote(new Note(alloca));
                 makeCompute(BinaryOperationInstruction.BinaryOperator.ADD, target, Reg.sp, target);
             }
         } else {
-            if (fit16) {
-                makeAddiu(Reg.k0, Reg.sp, currentOffset).setNote(new Note(alloca));
+            Reg temp = Reg.k0;
+            if (offset >= -32768 && offset <= 32767) {
+                makeAddiu(temp, Reg.sp, offset).setNote(new Note(alloca));
             } else {
-                makeLi(Reg.k0, currentOffset).setNote(new Note(alloca));
-                makeCompute(BinaryOperationInstruction.BinaryOperator.ADD, Reg.k0, Reg.sp, Reg.k0);
+                makeLi(temp, offset).setNote(new Note(alloca));
+                makeCompute(BinaryOperationInstruction.BinaryOperator.ADD, temp, Reg.sp, temp);
             }
-            makeStore(4, Reg.k0, findOffset(alloca), Reg.sp);
+            // 将指针存入 Spill Slot
+            makeStore(4, temp, findOffset(alloca), Reg.sp);
         }
     }
 
@@ -579,131 +739,94 @@ public class MipsCodeGenerator extends MipsAssembler {
         IRFunction func = (IRFunction) call.getCalledFunction();
         String name = func.getName().substring(1);
 
-        // 1. Syscall 特殊处理 (保持不变)
         if (handleSyscall(call, name, func)) return;
 
-        // ================== 调用约定处理 ==================
-
-        // 2. 确定需要保存的寄存器 (Caller-Saved)
-        // 包括两部分：
-        // A. RegAlloca 分析出的活跃变量 (主要是 $t 寄存器)
-        //    这些变量在函数调用后仍然存活，因此必须保存。
+        // 1. 保存 Caller-Saved 寄存器
         Set<Reg> regsToSaveSet = new HashSet<>(call.liveRegSet);
-
-        // B. 当前占据 $a0-$a3 的参数变量 (因为即将进行函数调用，这些寄存器会被覆盖)
-        //    我们遍历当前所有的寄存器映射，找出位于 $a0-$a3 的变量。
-        //    这些变量如果不保存，在设置新函数参数时就会被覆盖。
-        List<IRValue> argsInRegsToSpill = new ArrayList<>();
-
         for (Map.Entry<IRValue, Reg> entry : valRegs.entrySet()) {
             Reg r = entry.getValue();
             int rIdx = Reg.getIndex(r);
-            // 如果是 $a0(4) - $a3(7)，且不在 RegAlloca 的集合中(通常也不在)，必须强制保存
-            if (rIdx >= 4 && rIdx <= 7) {
-                regsToSaveSet.add(r);
-                argsInRegsToSpill.add(entry.getKey());
-            }
+            if (rIdx >= 4 && rIdx <= 7) regsToSaveSet.add(r);
         }
-
         ArrayList<Reg> saved = new ArrayList<>(regsToSaveSet);
-        // 排序以保持输出确定性
         saved.sort(Comparator.comparingInt(Reg::getIndex));
 
-        // 3. 执行保存动作 (Spill)
-        // 3.1 保存普通的 Caller-Saved 寄存器 (主要是 $t) -> 压入新栈帧的顶部区域
-        //     这些寄存器保存到当前栈帧的动态增长区。
+        // 2. 计算 Call Frame
         int savedRegsSize = saved.size() * 4;
-        for (int i = 0; i < saved.size(); i++) {
-            makeStore(4, saved.get(i), currentOffset - 4 * (i + 1), Reg.sp);
-        }
-
-        // 3.2 [关键] 将位于 $a0-$a3 的变量归位到它们自己的栈槽 (Backup Home)
-        //     因为对于函数参数，我们在 handleParameters 里分配了固定位置，而不是像 $t 那样临时压栈。
-        //     这里将它们“归位”到那个固定位置。
-        for (IRValue val : argsInRegsToSpill) {
-            Reg r = findReg(val); // 肯定是 a0-a3
-            Integer offset = findOffset(val); // 找它在函数开头分配的固定栈位置
-            if (offset != null) {
-                // 将寄存器值刷回栈
-                makeStore(4, r, offset, Reg.sp);
-                // 关键：暂时从寄存器映射中移除它，因为马上寄存器就要被覆盖了
-                // 这样后续代码(如passArgs)就会强制去栈上取值，避免取到被覆盖后的错误值
-                // 注意：这里只是临时移除映射，还是要在 valOffsets 里保留偏移
-                valRegs.remove(val);
-            }
-        }
-
-        // 4. 计算栈帧布局
         int argCount = call.getOperandCount() - 1;
-        // 计算需要通过栈传递的参数数量 (>4 的部分)
         int stackArgsCount = (argCount > 4) ? (argCount - 4) : 0;
         int stackArgsSize = stackArgsCount * 4;
-        // 总栈帧大小 = 保存的寄存器 + RA + 栈参数区
-        int frameSize = savedRegsSize + 4 + stackArgsSize; // +4 is for RA
+        int callFrameSize = savedRegsSize + 4 + stackArgsSize;
+        if (callFrameSize % 8 != 0) callFrameSize += (8 - (callFrameSize % 8));
 
-        // 5. 保存 RA
-        makeStore(4, Reg.ra, currentOffset - savedRegsSize - 4, Reg.sp);
+        // 3. 扩展栈空间
+        makeAddiu(Reg.sp, Reg.sp, -callFrameSize);
 
-        // 6. 传递参数 (passArgs)
-        // 这里需要微调：因为刚才我们把 $a0-$a3 的旧值存回栈并移除了映射，
-        // 所以这里取参数时，如果发现 map 里没了，会自动去栈上 load (makeLoad)，这是安全的。
+        // 4. 保存上下文
+        int topOfFrame = callFrameSize;
+        for (int i = 0; i < saved.size(); i++) {
+            makeStore(4, saved.get(i), topOfFrame - 4 * (i + 1), Reg.sp);
+        }
+        makeStore(4, Reg.ra, topOfFrame - savedRegsSize - 4, Reg.sp);
+
+        // 5. 传递参数
         for (int i = 0; i < argCount; i++) {
             IRValue arg = call.getOperand(i + 1);
-
-            // 目标寄存器或栈位置
             if (i < 4) {
-                // 前4个参数 -> $a0-$a3
                 Reg argReg = Reg.getArgReg(i);
-                loadValueToTarget(arg, argReg);
+                loadValueWithSpOffset(arg, argReg, callFrameSize);
             } else {
-                // 后续参数 -> 压栈
-                Reg temp = Reg.v1; // 使用 v1 搬运，避免干扰参数寄存器
-                loadValueToTarget(arg, temp);
-                // 计算在目标栈帧中的位置 (注意这里的 currentOffset 是基于当前函数的)
-                int offset = currentOffset - savedRegsSize - 4 - (i - 3) * 4;
+                Reg temp = Reg.v1;
+                loadValueWithSpOffset(arg, temp, callFrameSize);
+                int offset = (i - 4) * 4;
                 makeStore(4, temp, offset, Reg.sp);
             }
         }
 
-        // 7. 移动 SP, 跳转 Jal, 恢复 RA, 恢复 SP
-        int spDelta = currentOffset - frameSize;
-        if (spDelta >= -32768 && spDelta <= 32767) {
-            makeAddiu(Reg.sp, Reg.sp, spDelta);
-        } else {
-            makeLi(Reg.k0, spDelta);
-            makeCompute(BinaryOperationInstruction.BinaryOperator.ADD, Reg.sp, Reg.sp, Reg.k0);
-        }
-
+        // 6. 跳转
         makeJal(name);
 
-        makeLoad(4, Reg.ra, stackArgsSize, Reg.sp);
-
-        int spRestore = -(currentOffset - frameSize);
-        if (spRestore >= -32768 && spRestore <= 32767) {
-            makeAddiu(Reg.sp, Reg.sp, spRestore);
-        } else {
-            makeLi(Reg.k0, spRestore);
-            makeCompute(BinaryOperationInstruction.BinaryOperator.ADD, Reg.sp, Reg.sp, Reg.k0);
-        }
-
-
-        // 8. 恢复上下文 (Restore)
-        // 8.1 恢复 $t 等寄存器 (从临时保存区)
+        // 7. 恢复上下文
+        makeLoad(4, Reg.ra, topOfFrame - savedRegsSize - 4, Reg.sp);
         for (int i = 0; i < saved.size(); i++) {
-            makeLoad(4, saved.get(i), currentOffset - 4 * (i + 1), Reg.sp);
+            makeLoad(4, saved.get(i), topOfFrame - 4 * (i + 1), Reg.sp);
         }
 
-        // 8.2 [关键] 恢复 $a0-$a3 的映射
-        // 不需要写代码去 load 回 $a0-$a3，采用 Lazy Reload 策略。
-        // 因为这些变量已经被存回栈里的固定位置 (Backup Home)，
-        // 后续指令如果需要用到它们，会发现寄存器映射没了，自动生成 Load 指令从栈里取。
-        // 这避免了不必要的 Load 操作。
+        // 8. [关键] 先恢复 SP，再存储返回值
+        // 这样 findOffset(call) 才能基于正确的(恢复后的) SP 计算地址
+        makeAddiu(Reg.sp, Reg.sp, callFrameSize);
 
         // 9. 处理返回值
         if (!(call.getType() instanceof VoidType)) {
-            // 将 $v0 的返回值移动到目标寄存器或存入栈
-            if (findReg(call) != null) makeMove(findReg(call), Reg.v0);
-            else makeStore(call.getType().getByteSize(), Reg.v0, findOffset(call), Reg.sp);
+            if (findReg(call) != null) {
+                makeMove(findReg(call), Reg.v0);
+            } else {
+                // 此时 SP 已恢复，findOffset(call) 是安全的
+                makeStore(call.getType().getByteSize(), Reg.v0, findOffset(call), Reg.sp);
+            }
+        }
+    }
+
+    /**
+     * 辅助方法：从栈或寄存器加载值，考虑 SP 已经移动了 delta 距离
+     * @param val 值
+     * @param target 目标寄存器
+     * @param spDelta 当前 SP 相对于函数基准 SP 的下移量
+     */
+    private void loadValueWithSpOffset(IRValue val, Reg target, int spDelta) {
+        if (val instanceof IntegerConstant) {
+            makeLi(target, ((IntegerConstant) val).getConstantValue());
+        } else {
+            Reg src = findReg(val);
+            if (src != null) {
+                if (src != target) makeMove(target, src);
+            } else {
+                // 如果值在栈上，原本的 offset 是相对于旧 SP 的
+                // 现在的 SP 比旧 SP 小 spDelta，所以访问地址应该是 (offset + spDelta)($sp)
+                int originalOffset = findOffset(val);
+                int align = (val.getType() == IntegerType.I8) ? 1 : 4;
+                makeLoad(align, target, originalOffset + spDelta, Reg.sp);
+            }
         }
     }
 
@@ -973,6 +1096,36 @@ public class MipsCodeGenerator extends MipsAssembler {
             String trueLbl = ((IRBasicBlock) br.getOperand(1)).getName().substring(1);
             String falseLbl = ((IRBasicBlock) br.getOperand(2)).getName().substring(1);
 
+            if (cond instanceof CompareInstruction && deferredCmps.contains((CompareInstruction) cond)) {
+                CompareInstruction icmp = (CompareInstruction) cond;
+                IRValue l = icmp.getLeftOperand();
+                IRValue r = icmp.getRightOperand();
+                Reg r1 = Reg.k0, r2 = Reg.k1;
+                loadValToReg(l, r1);
+                loadValToReg(r, r2);
+                switch (icmp.getCondition()) {
+                    case EQ:
+                        makeBeq(r1, r2, trueLbl);
+                        makeJ(falseLbl);
+                        return;
+                    case NE:
+                        makeBne(r1, r2, trueLbl);
+                        makeJ(falseLbl);
+                        return;
+                    case SLT:
+                    case SLE:
+                    case SGT:
+                    case SGE:
+                        Reg t = Reg.k0;
+                        makeCompare(icmp.getCondition(), t, r1, r2);
+                        makeBne(t, Reg.zero, trueLbl);
+                        makeJ(falseLbl);
+                        return;
+                    default:
+                        break;
+                }
+            }
+
             if (cond instanceof IntegerConstant) {
                 // 常量折叠：直接跳转
                 makeJ(((IntegerConstant) cond).getConstantValue() != 0 ? trueLbl : falseLbl);
@@ -1000,7 +1153,6 @@ public class MipsCodeGenerator extends MipsAssembler {
      */
     public void mapRet(ReturnInstruction ret) {
         if (currentFunction.getName().equals("@main")) {
-            // main 函数返回时，调用 exit syscall
             makeLi(Reg.v0, 10);
             makeSyscall();
         } else {
@@ -1015,7 +1167,10 @@ public class MipsCodeGenerator extends MipsAssembler {
                     makeLoad(align, Reg.v0, findOffset(val), Reg.sp);
                 }
             }
-            // 跳转回 RA
+            // 恢复栈指针 (Epilogue)
+            if (currentFrameSize > 0) {
+                makeAddiu(Reg.sp, Reg.sp, currentFrameSize);
+            }
             makeJr(Reg.ra);
         }
     }

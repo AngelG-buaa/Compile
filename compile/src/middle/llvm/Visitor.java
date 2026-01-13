@@ -28,6 +28,7 @@ import front.parser.syntax.exp.PrimaryExp;
 import front.parser.syntax.exp.PrimaryUnaryExp;
 import front.parser.syntax.exp.RelExp;
 import front.parser.syntax.exp.UnaryExp;
+import front.parser.syntax.exp.UnaryOp;
 import front.parser.syntax.func.FuncDef;
 import front.parser.syntax.func.FuncFParam;
 import front.parser.syntax.func.FuncFParams;
@@ -38,14 +39,24 @@ import front.parser.syntax.stmt.Block;
 import front.parser.syntax.stmt.BlockItem;
 import front.parser.syntax.stmt.BlockStmt;
 import front.parser.syntax.stmt.BreakStmt;
+import front.parser.syntax.stmt.CaseStmt;
 import front.parser.syntax.stmt.ContinueStmt;
+import front.parser.syntax.stmt.ContinueStmt;
+import front.parser.syntax.stmt.DecStmt;
+import front.parser.syntax.stmt.DoWhileStmt;
 import front.parser.syntax.stmt.ExpStmt;
 import front.parser.syntax.stmt.ForLoopStmt;
 import front.parser.syntax.stmt.ForStmt;
+import front.parser.syntax.stmt.GotoStmt;
 import front.parser.syntax.stmt.IfStmt;
+import front.parser.syntax.stmt.IncStmt;
+import front.parser.syntax.stmt.LabelStmt;
 import front.parser.syntax.stmt.PrintStmt;
+import front.parser.syntax.stmt.RepeatStmt;
 import front.parser.syntax.stmt.ReturnStmt;
 import front.parser.syntax.stmt.Stmt;
+import front.parser.syntax.stmt.SwitchStmt;
+import front.parser.syntax.stmt.WhileStmt;
 import middle.llvm.IR_Symbol.IRSymTable;
 import middle.llvm.type.ArrayType;
 import middle.llvm.type.IRType;
@@ -89,6 +100,28 @@ public class Visitor extends IRInstructionFactory {
     private final Deque<LoopStructure> loops;
 
     /**
+     * 管理所有Switch的栈
+     */
+    private final Deque<SwitchStructure> switches;
+    
+    /**
+     * 标签映射 (Label -> BasicBlock)
+     * 每个函数重置一次
+     */
+    private Map<String, IRBasicBlock> labelMap;
+    private ArrayList<GotoStmt> unresolvedGotos; // 处理前向引用
+
+    /**
+     * 控制流栈（LoopStructure 或 SwitchStructure）
+     */
+    private final Deque<Object> controlStack;
+
+    /**
+     * 是否加载左值（默认true）。如果为false，visitLVal返回指针而不是值。
+     */
+    private boolean loadLVal = true;
+
+    /**
      * 编译时可求值则为true
      */
     private boolean culWhileCompiling = false;
@@ -111,6 +144,10 @@ public class Visitor extends IRInstructionFactory {
         this.rootSymbolTable = new IRSymTable(null);
         this.curSymbolTable = this.rootSymbolTable;
         this.loops = new ArrayDeque<>();
+        this.switches = new ArrayDeque<>();
+        this.controlStack = new ArrayDeque<>();
+        this.labelMap = new HashMap<>();
+        this.unresolvedGotos = new ArrayList<>();
     }
 
 
@@ -182,6 +219,7 @@ public class Visitor extends IRInstructionFactory {
         String varName = identifier.getContent();
         ArrayList<ConstExp> constExp = ((VarDef) varDef).getConstExps();
         InitVal initVal = ((VarDef) varDef).getInitValue();
+        boolean isGetInt = ((VarDef) varDef).isGetintVariable();
         // initVal具体是什么
         ArrayList<IRValue> initVals;
 
@@ -234,6 +272,17 @@ public class Visitor extends IRInstructionFactory {
                 }
                 curSymbolTable.insertSymbol(varName,staticVariable);
             }
+            // getint的变量
+            else if (isGetInt) {
+                AllocaInstruction alloc = createAlloca(getIntType(bType));
+                curSymbolTable.insertSymbol(varName,alloc);
+
+                ArrayList<IRValue> params = new ArrayList<>();
+                CallInstruction getIntCall = createCall(IRFunction.GETINT, params);
+
+                IRInstruction resized = ensureIntegerType(getIntCall, getIntType(bType));
+                createStore(resized == null ? getIntCall : resized, alloc);
+            }
             // 普通非静态局部变量
             else {
                 AllocaInstruction alloc = createAlloca(getIntType(bType));
@@ -255,10 +304,15 @@ public class Visitor extends IRInstructionFactory {
         }
         // 数组变量定义
         else {
-            // 计算数组长度
-            int arrayLen = visitConstExp(constExp.get(0));
-            // 根据数组长度和元素类型，得到数组类型
-            ArrayType arrayType = new ArrayType(getIntType(bType), arrayLen);
+            // 计算数组类型（支持多维）
+            IRType currentType = getIntType(bType);
+            // 从右向左构建ArrayType (int a[2][3] -> [2 x [3 x i32]])
+            for (int i = constExp.size() - 1; i >= 0; i--) {
+                int dim = visitConstExp(constExp.get(i));
+                currentType = new ArrayType(currentType, dim);
+            }
+            ArrayType arrayType = (ArrayType) currentType;
+            
             // 全局数组
             if (isGlobal()) {
                 IRGlobalVariable globalVariable;
@@ -271,7 +325,15 @@ public class Visitor extends IRInstructionFactory {
                 // 有初始值
                 else {
                     culWhileCompiling = true;
-                    initVals = visitInitVal(initVal, getIntType(bType) == IntegerType.I8, arrayLen);
+                    // 计算总元素个数用于扁平化初始化
+                    int totalSize = 1;
+                    IRType temp = arrayType;
+                    while (temp instanceof ArrayType) {
+                        totalSize *= ((ArrayType) temp).getArrayLenth();
+                        temp = ((ArrayType) temp).getElementType();
+                    }
+                    
+                    initVals = visitInitVal(initVal, getIntType(bType) == IntegerType.I8, totalSize);
                     culWhileCompiling = false;
 
                     ArrayList<Integer> initInts = new ArrayList<>();
@@ -300,7 +362,15 @@ public class Visitor extends IRInstructionFactory {
                 // 有初始值
                 else {
                     culWhileCompiling = true;
-                    initVals = visitInitVal(initVal, getIntType(bType) == IntegerType.I8, arrayLen);
+                    // 计算总元素个数
+                    int totalSize = 1;
+                    IRType temp = arrayType;
+                    while (temp instanceof ArrayType) {
+                        totalSize *= ((ArrayType) temp).getArrayLenth();
+                        temp = ((ArrayType) temp).getElementType();
+                    }
+                    
+                    initVals = visitInitVal(initVal, getIntType(bType) == IntegerType.I8, totalSize);
                     culWhileCompiling = false;
 
                     ArrayList<Integer> initInts = new ArrayList<>();
@@ -323,9 +393,30 @@ public class Visitor extends IRInstructionFactory {
                 curSymbolTable.insertSymbol(varName,alloc);
                 // 处理初始值
                 if (initVal != null) {
-                    initVals = visitInitVal(initVal, getIntType(bType) == IntegerType.I8, arrayLen);
+                    // 计算总元素个数
+                    int totalSize = 1;
+                    IRType temp = arrayType;
+                    while (temp instanceof ArrayType) {
+                        totalSize *= ((ArrayType) temp).getArrayLenth();
+                        temp = ((ArrayType) temp).getElementType();
+                    }
+                    
+                    initVals = visitInitVal(initVal, getIntType(bType) == IntegerType.I8, totalSize);
                     // GEP获取一个int*
-                    GetElementPtrInstruction basePtr = createGetElementPtr(alloc);
+                    // 对于多维数组，我们需要解引用到最底层元素
+                    // alloc 是 [n x [m x i32]]*
+                    // 我们需要 GEP 0, 0, 0 ... 得到 i32*
+                    
+                    ArrayList<IRValue> indices = new ArrayList<>();
+                    indices.add(new IntegerConstant(IntegerType.I32, 0)); // dereference pointer
+                    IRType tempType = arrayType;
+                    while (tempType instanceof ArrayType) {
+                        indices.add(new IntegerConstant(IntegerType.I32, 0)); // index into array
+                        tempType = ((ArrayType) tempType).getElementType();
+                    }
+                    
+                    GetElementPtrInstruction basePtr = createGetElementPtr(alloc, indices);
+                    
                     // 处理位数不匹配
                     IRInstruction instruction = ensureIntegerType(initVals.get(0),getIntType(bType));
                     if (instruction != null) {
@@ -353,25 +444,119 @@ public class Visitor extends IRInstructionFactory {
     /**
      * InitVal → Exp | '{' [ Exp { ',' Exp } ] '}' | StringConst
      */
-    public ArrayList<IRValue> visitInitVal(InitVal initVal, boolean isChar, int length) {
+    /**
+     * 辅助方法：生成指定类型的零值列表
+     */
+    private ArrayList<IRValue> getZeroValues(IRType type) {
         ArrayList<IRValue> res = new ArrayList<>();
-
-        // 1. 收集所有显式初始化的值
-        ArrayList<Exp> exps = initVal.getExps();
-        if (exps != null) {
-            for (Exp exp : exps) {
-                res.add(visitExp(exp));
+        if (type.isBasicIntegerType()) {
+            res.add(new IntegerConstant((IntegerType) type, 0));
+        } else if (type.isArrayType()) {
+            ArrayType arrType = (ArrayType) type;
+            int total = arrType.getArrayLenth();
+            ArrayList<IRValue> subZeros = getZeroValues(arrType.getElementType());
+            for (int i = 0; i < total; i++) {
+                res.addAll(subZeros);
             }
         }
+        return res;
+    }
 
-        // 2. 自动补零到指定长度
-        // 无论是 int 数组还是 char 数组，只要初始值个数少于数组长度，都应该补零
-        // 例如: int a[3] = {} -> 补3个0
-        //       int a[3] = {1} -> 补2个0
-        while (res.size() < length) {
-            res.add(new IntegerConstant(isChar ? IntegerType.I8 : IntegerType.I32, 0));
+    public ArrayList<IRValue> visitInitVal(InitVal initVal, boolean isChar, int length) {
+        // Wrapper for compatibility or specific 1D array/scalar usage
+        IRType eleType = isChar ? IntegerType.I8 : IntegerType.I32;
+        IRType type = length == 1 ? eleType : new ArrayType(eleType, length);
+        
+        return visitInitVal(initVal, type);
+    }
+    
+    public ArrayList<IRValue> visitInitVal(InitVal initVal, IRType type) {
+        ArrayList<IRValue> res = new ArrayList<>();
+        
+        if (type.isBasicIntegerType()) { // isIntegerType -> isBasicIntegerType or isI
+            if (initVal.isLeaf()) {
+                // 表达式初始化
+                res.add(visitExp(initVal.getExp()));
+            } else {
+                // '{' Exp '}' 形式
+                if (!initVal.getInitVals().isEmpty()) {
+                    res.addAll(visitInitVal(initVal.getInitVals().get(0), type));
+                }
+            }
+        } else if (type.isArrayType()) {
+            ArrayType arrType = (ArrayType) type;
+            int eleNum = arrType.getArrayLenth(); // getElementNum -> getArrayLenth
+            IRType eleType = arrType.getElementType();
+            
+            if (initVal.isLeaf()) {
+                // 不应该发生，除非是字符串字面量初始化 char[] (TODO)
+            } else {
+                ArrayList<InitVal> children = initVal.getInitVals();
+                int childIdx = 0;
+                for (int i = 0; i < eleNum; i++) {
+                    if (childIdx < children.size()) {
+                        res.addAll(visitInitVal(children.get(childIdx++), eleType));
+                    } else {
+                        res.addAll(getZeroValues(eleType));
+                    }
+                }
+            }
         }
+        return res;
+    }
 
+    /**
+     * 辅助方法：生成指定类型的零值列表（Integer）
+     */
+    private ArrayList<Integer> getZeroInts(IRType type) {
+        ArrayList<Integer> res = new ArrayList<>();
+        if (type.isBasicIntegerType()) { // isIntegerType -> isBasicIntegerType
+            res.add(0);
+        } else if (type.isArrayType()) {
+            ArrayType arrType = (ArrayType) type;
+            int total = arrType.getArrayLenth(); // getElementNum -> getArrayLenth
+            ArrayList<Integer> subZeros = getZeroInts(arrType.getElementType());
+            for (int i = 0; i < total; i++) {
+                res.addAll(subZeros);
+            }
+        }
+        return res;
+    }
+
+    public ArrayList<Integer> visitConstInitVal(ConstInitVal initVal, boolean isChar, int length) {
+        IRType eleType = isChar ? IntegerType.I8 : IntegerType.I32;
+        IRType type = length == 1 ? eleType : new ArrayType(eleType, length);
+        return visitConstInitVal(initVal, type);
+    }
+    
+    public ArrayList<Integer> visitConstInitVal(ConstInitVal initVal, IRType type) {
+        ArrayList<Integer> res = new ArrayList<>();
+        
+        if (type.isBasicIntegerType()) { // isIntegerType -> isBasicIntegerType
+            if (initVal.isLeaf()) {
+                res.add(visitConstExp(initVal.getConstExp()));
+            } else {
+                if (!initVal.getInitVals().isEmpty()) {
+                    res.addAll(visitConstInitVal(initVal.getInitVals().get(0), type));
+                }
+            }
+        } else if (type.isArrayType()) {
+            ArrayType arrType = (ArrayType) type;
+            int eleNum = arrType.getArrayLenth(); // getElementNum -> getArrayLenth
+            IRType eleType = arrType.getElementType();
+            
+            if (!initVal.isLeaf()) {
+                ArrayList<ConstInitVal> children = initVal.getInitVals();
+                int childIdx = 0;
+                for (int i = 0; i < eleNum; i++) {
+                    if (childIdx < children.size()) {
+                        res.addAll(visitConstInitVal(children.get(childIdx++), eleType));
+                    } else {
+                        res.addAll(getZeroInts(eleType));
+                    }
+                }
+            }
+        }
         return res;
     }
 
@@ -404,26 +589,29 @@ public class Visitor extends IRInstructionFactory {
      */
     public void visitConstDef(BranchNode constDef, BType bType) {
         TokenNode ident = ((ConstDef)constDef).getIdentifier();
-        ConstExp constExp = ((ConstDef)constDef).getConstExp();
+        ArrayList<ConstExp> constExps = ((ConstDef)constDef).getConstExps();
         ConstInitVal initVal = ((ConstDef) constDef).getInitValue();
 
-        ArrayList<Integer> initInts = visitConstInitVal(initVal);
-
         // 非数组的普通定义
-        if (constExp == null) {
-            IntegerConstant constInits
-                    = new IntegerConstant(
-                    getIntType(bType.getType()),
-                    initInts.get(0));
+        if (constExps.isEmpty()) {
+            IntegerType type = getIntType(bType.getType());
+            ArrayList<Integer> initInts = visitConstInitVal(initVal, type);
+            int val = initInts.isEmpty() ? 0 : initInts.get(0);
+            IntegerConstant constInits = new IntegerConstant(type, val);
 
             curSymbolTable.insertSymbol(ident.getContent(),constInits);
         }
         // 数组
         else {
-            // 计算数组长度
-            int arrayLen = visitConstExp(constExp);
-            // 根据数组长度和元素类型，得到数组类型
-            ArrayType arrayType = new ArrayType(getIntType(bType.getType()), arrayLen);
+            // 计算数组类型
+            IRType currentType = getIntType(bType.getType());
+            for (int i = constExps.size() - 1; i >= 0; i--) {
+                int dim = visitConstExp(constExps.get(i));
+                currentType = new ArrayType(currentType, dim);
+            }
+            ArrayType arrayType = (ArrayType) currentType;
+            
+            ArrayList<Integer> initInts = visitConstInitVal(initVal, arrayType);
             ArrayConstant constArray = new ArrayConstant(arrayType, initInts);
 
             if (isGlobal()) {
@@ -432,16 +620,6 @@ public class Visitor extends IRInstructionFactory {
                 curSymbolTable.insertSymbol(ident.getContent(),globalVariable);
             } else {
                 // 局部数组
-                /**
-                 *     %1 = alloca [3 x i32]
-                 *     %2 = getelementptr inbounds [3 x i32], [3 x i32]* %1, i32 0, i32 0
-                 *     store i32 1, i32* %2
-                 *     %3 = getelementptr inbounds i32, i32* %2, i32 1
-                 *     store i32 2, i32* %3
-                 *     %4 = getelementptr inbounds i32, i32* %3, i32 1
-                 *     store i32 3, i32* %4
-                 */
-                // alloca长为arrayLen的空间
                 AllocaInstruction alloc = createAlloca(arrayType,constArray);
                 curSymbolTable.insertSymbol(ident.getContent(),alloc);
                 // GEP得到int*指针
@@ -459,28 +637,11 @@ public class Visitor extends IRInstructionFactory {
     }
 
     /**
-     * 常量初值 ConstInitVal → ConstExp | '{' [ ConstExp { ',' ConstExp } ] '}'
-     */
-    public ArrayList<Integer> visitConstInitVal(ConstInitVal initVal) {
-        ArrayList<Integer> res = new ArrayList<>();
-
-        ArrayList<ConstExp> constExps = initVal.getExps();
-        if (constExps.size() == 1) {
-            res.add(visitConstExp(constExps.get(0)));
-        }
-        else {
-            for (ConstExp constExp : constExps) {
-                res.add(visitConstExp(constExp));
-            }
-        }
-        return res;
-    }
-
-    /**
      * 访问函数定义
      * FuncDef → FuncType Ident '(' [FuncFParams] ')' Block
      */
     public void visitFuncDef(BranchNode funcDef) {
+        labelMap.clear();
         FuncType funcType = ((FuncDef)funcDef).getFuncType();
         TokenNode indent = ((FuncDef)funcDef).getIdentifier();
         FuncFParams fParams = ((FuncDef)funcDef).getParams();
@@ -628,6 +789,197 @@ public class Visitor extends IRInstructionFactory {
     }
 
     /**
+     * SwitchStmt → 'switch' '(' Exp ')' Stmt
+     */
+    public void visitSwitchStmt(SwitchStmt stmt) {
+        // 1. 计算switch的条件表达式
+        IRValue cond = visitExp(stmt.getExp());
+        
+        // 2. 准备关键基本块
+        IRBasicBlock startBlock = currentBasicBlock; // switch语句开始前的块，用于后续插入分发逻辑
+        IRBasicBlock exitBlock = createBasicBlock(); // switch语句结束后的出口块
+        SwitchStructure switchStruct = new SwitchStructure(startBlock, exitBlock);
+        
+        // 3. 维护控制流栈，以便break语句能找到跳转目标
+        switches.push(switchStruct);
+        controlStack.push(switchStruct);
+        
+        // 4. 创建一个“死代码”占位块 (entryDummy)
+        // 作用：switch中第一个case之前的代码是不可达的（死代码）。
+        // 我们将当前块切换到这个占位块，让这些死代码生成在其中。
+        // 注意：我们不会生成跳转到entryDummy的指令，因此它在运行时永远不会被执行。
+        IRBasicBlock entryDummy = createBasicBlock();
+        currentBasicBlock = entryDummy;
+        
+        // 5. 访问switch体（会包含多个CaseStmt）
+        // 在访问CaseStmt时，会不断更新currentBasicBlock到新的case块
+        if (stmt.getStmt() != null) {
+            visitStmt(stmt.getStmt());
+        }
+        
+        // 6. 处理最后一个case的fall-through
+        // 如果最后一个case没有break（即没有终结指令），需要跳转到出口块
+        if (!currentBasicBlock.isTerminated()) {
+            createJump(exitBlock);
+        }
+        
+        // 7. 回填分发逻辑 (Dispatch Logic)
+        // 将currentBasicBlock切回到startBlock，在其中插入级联比较指令
+        currentBasicBlock = startBlock;
+        
+        IRBasicBlock defaultBlock = switchStruct.getDefaultBlock();
+        
+        // 遍历所有case，生成 if-else if 风格的级联比较
+        for (Map.Entry<Integer, IRBasicBlock> entry : switchStruct.getCases().entrySet()) {
+            int val = entry.getKey(); // case的值
+            IRBasicBlock target = entry.getValue(); // case对应的跳转目标块
+            IRBasicBlock nextCheck = createBasicBlock(); // 下一次比较的块
+            
+            // 生成比较指令: %cmp = icmp eq %cond, val
+            IRInstruction cmp = createCompare(CompareInstruction.CompareCondition.EQ, cond, new IntegerConstant(IntegerType.I32, val));
+            // 生成条件跳转: br %cmp, label %target, label %nextCheck
+            createBranch(cmp, target, nextCheck);
+            
+            // 切换到下一个比较块继续生成
+            currentBasicBlock = nextCheck;
+        }
+        
+        // 8. 处理default分支
+        // 如果没有匹配任何case，跳转到default块（如果没有default，则跳到exitBlock）
+        // 注意：SwitchStructure在没有default时，getDefaultBlock()通常返回exitBlock
+        createJump(defaultBlock);
+        
+        // 9. 恢复上下文
+        currentBasicBlock = exitBlock; // switch语句结束后，控制流停在exitBlock
+        switches.pop();
+        controlStack.pop();
+    }
+
+    /**
+     * CaseStmt → 'case' ConstExp ':' Stmt | 'default' ':' Stmt
+     */
+    public void visitCaseStmt(CaseStmt stmt) {
+        SwitchStructure curSwitch = switches.peek();
+        IRBasicBlock caseBlock = createBasicBlock(); // 为当前case创建一个新的基本块
+        
+        // 1. 处理Fall-through（贯穿）
+        // 检查上一个块是否已经结束（例如是否有break）。
+        // 如果没结束，说明上一个case需要贯穿执行到当前case，因此插入跳转指令。
+        if (!currentBasicBlock.isTerminated()) {
+            createJump(caseBlock);
+        }
+        
+        // 2. 切换到当前case块
+        currentBasicBlock = caseBlock;
+        
+        // 3. 注册case信息到SwitchStructure，供后续生成分发逻辑使用
+        if (stmt.isDefault()) {
+            curSwitch.setDefaultBlock(caseBlock);
+        } else {
+            int val = visitConstExp(stmt.getConstExp());
+            curSwitch.addCase(val, caseBlock);
+        }
+        
+        // 4. 访问case内部的语句
+        if (stmt.getStmt() != null) {
+            visitStmt(stmt.getStmt());
+        }
+    }
+
+    /**
+     * DoWhileStmt → 'do' Stmt 'while' '(' Cond ')' ';'
+     */
+    public void visitDoWhileStmt(DoWhileStmt stmt) {
+        IRBasicBlock bodyBlock = createBasicBlock();
+        IRBasicBlock condBlock = createBasicBlock();
+        IRBasicBlock exitBlock = createBasicBlock();
+        
+        LoopStructure loop = new LoopStructure(currentBasicBlock, condBlock, bodyBlock, condBlock, exitBlock);
+        loops.push(loop);
+        controlStack.push(loop);
+        
+        createJump(bodyBlock);
+        
+        currentBasicBlock = bodyBlock;
+        visitStmt(stmt.getStmt());
+        createJump(condBlock);
+        
+        currentBasicBlock = condBlock;
+        visitCond(stmt.getCond(), bodyBlock, exitBlock);
+        
+        currentBasicBlock = exitBlock;
+        loops.pop();
+        controlStack.pop();
+    }
+
+    /**
+     * 'repeat' Stmt 'until' '(' Cond ')' ';'
+     */
+    public void visitRepeatStmt(RepeatStmt stmt) {
+        IRBasicBlock bodyBlock = createBasicBlock();
+        IRBasicBlock condBlock = createBasicBlock();
+        IRBasicBlock exitBlock = createBasicBlock();
+
+        LoopStructure loop = new LoopStructure(currentBasicBlock, condBlock, bodyBlock, condBlock, exitBlock);
+        loops.push(loop);
+        controlStack.push(loop);
+
+        createJump(bodyBlock);
+
+        currentBasicBlock = bodyBlock;
+        visitStmt(stmt.getStmt());
+        createJump(condBlock);
+
+        currentBasicBlock = condBlock;
+        visitCond(stmt.getCond(), exitBlock, bodyBlock);
+
+        currentBasicBlock = exitBlock;
+        loops.pop();
+        controlStack.pop();
+    }
+
+    /**
+     * GotoStmt → 'goto' Ident ';'
+     */
+    public void visitGotoStmt(GotoStmt stmt) {
+        String label = stmt.getIdentifier().getContent();
+        IRBasicBlock target = labelMap.get(label);
+        if (target == null) {
+            target = createBasicBlock(); // Use createBasicBlock instead of new IRBasicBlock
+            labelMap.put(label, target);
+        }
+        createJump(target);
+        currentBasicBlock = createBasicBlock(); // Use createBasicBlock instead of new IRBasicBlock
+    }
+
+    /**
+     * LabelStmt → Ident ':' Stmt
+     */
+    public void visitLabelStmt(LabelStmt stmt) {
+        String label = stmt.getIdentifier().getContent();
+        IRBasicBlock block = labelMap.get(label);
+        if (block == null) {
+            block = createBasicBlock();
+            labelMap.put(label, block);
+        } else {
+            // 调整顺序：将已创建的块移动到当前位置
+            currentFunction.getBasicBlocks().remove(block);
+            currentFunction.getBasicBlocks().add(block);
+        }
+        
+        if (!currentBasicBlock.isTerminated()) {
+            createJump(block);
+        }
+        currentBasicBlock = block;
+        if (stmt.getStmt() != null) {
+            visitStmt(stmt.getStmt());
+        }
+    }
+    
+    // 需要在 visitFuncDef 中重置 labelMap
+    // ... 在 visitFuncDef 开头添加 labelMap.clear();
+
+    /**
      * Stmt → LVal '=' Exp ';'
      * | [Exp] ';'
      * | Block
@@ -637,6 +989,12 @@ public class Visitor extends IRInstructionFactory {
      * | 'continue' ';'
      * | 'return' [Exp] ';'
      * | 'printf''('StringConst {','Exp}')'';'
+     * | 'switch' '(' Exp ')' Stmt
+     * | 'case' ConstExp ':' Stmt
+     * | 'default' ':' Stmt
+     * | 'do' Stmt 'while' '(' Cond ')' ';'
+     * | 'goto' Ident ';'
+     * | Ident ':' Stmt
      */
     public void visitStmt(Stmt stmt) {
         List<AstNode> children = stmt.getChildren();
@@ -659,6 +1017,66 @@ public class Visitor extends IRInstructionFactory {
             visitPrintfStmt((PrintStmt) stmt);
         } else if (stmt instanceof ExpStmt) {
             visitExpStmt((ExpStmt) stmt);
+        } else if (stmt instanceof IncStmt) {
+            visitIncStmt((IncStmt) stmt);
+        } else if (stmt instanceof DecStmt) {
+            visitDecStmt((DecStmt) stmt);
+        } else if (stmt instanceof SwitchStmt) {
+            visitSwitchStmt((SwitchStmt) stmt);
+        } else if (stmt instanceof CaseStmt) {
+            visitCaseStmt((CaseStmt) stmt);
+        } else if (stmt instanceof DoWhileStmt) {
+            visitDoWhileStmt((DoWhileStmt) stmt);
+        } else if (stmt instanceof WhileStmt) {
+            visitWhileStmt((WhileStmt) stmt);
+        } else if (stmt instanceof GotoStmt) {
+            visitGotoStmt((GotoStmt) stmt);
+        } else if (stmt instanceof LabelStmt) {
+            visitLabelStmt((LabelStmt) stmt);
+        } else if (stmt instanceof RepeatStmt) {
+            visitRepeatStmt((RepeatStmt) stmt);
+        }
+    }
+
+    private void visitIncStmt(IncStmt stmt) {
+        IRValue ptr = visitLVal(stmt.getIdentifier());
+        if (!(ptr.getType() instanceof PointerType)) {
+            return;
+        }
+        IRValue oldValue = createLoad(ptr); // !!!!!
+        IRInstruction resizeInst = ensureIntegerType(oldValue, IntegerType.I32);
+        oldValue = resizeInst == null ? oldValue : resizeInst;
+        IRValue newValue = createBinaryOperation(
+                BinaryOperationInstruction.BinaryOperator.ADD,
+                oldValue,
+                new IntegerConstant(IntegerType.I32, 1));
+        IRType pointeeType = ((PointerType) ptr.getType()).getPointeeType();
+        if (pointeeType instanceof IntegerType) {
+            IRInstruction cast = ensureIntegerType(newValue, (IntegerType) pointeeType);
+            createStore(cast == null ? newValue : cast, ptr);
+        } else {
+            createStore(newValue, ptr);
+        }
+    }
+
+    private void visitDecStmt(DecStmt stmt) {
+        IRValue ptr = visitLVal(stmt.getIdentifier());
+        if (!(ptr.getType() instanceof PointerType)) {
+            return;
+        }
+        IRValue oldValue = createLoad(ptr);
+        IRInstruction resizeInst = ensureIntegerType(oldValue, IntegerType.I32);
+        oldValue = resizeInst == null ? oldValue : resizeInst;
+        IRValue newValue = createBinaryOperation(
+                BinaryOperationInstruction.BinaryOperator.SUB,
+                oldValue,
+                new IntegerConstant(IntegerType.I32, 1));
+        IRType pointeeType = ((PointerType) ptr.getType()).getPointeeType();
+        if (pointeeType instanceof IntegerType) {
+            IRInstruction cast = ensureIntegerType(newValue, (IntegerType) pointeeType);
+            createStore(cast == null ? newValue : cast, ptr);
+        } else {
+            createStore(newValue, ptr);
         }
     }
 
@@ -733,7 +1151,7 @@ public class Visitor extends IRInstructionFactory {
             // 把当前 IR 写入位置切换到 if 分支对应的基本块
                 /*
                 如果 if 分支体是一个 Block，
-                作用域是在 visitStmt(ifStmt) 的分派中由 visitBlockSubStmt 内部，
+                作用域是在 visitStmt(ifStmt) 的分派中由 visitBlockStmt 内部，
                 调用 enter()/leave() 自动管理的；
                 如果分支体不是 Block，则本就不应该新建作用域
                  */
@@ -780,6 +1198,54 @@ public class Visitor extends IRInstructionFactory {
 
             currentBasicBlock = bb_end;
         }
+    }
+
+    /**
+     * WhileStmt → 'while' '(' Cond ')' Stmt
+     */
+    private void visitWhileStmt(WhileStmt stmt) {
+        // 1. 获取条件表达式和循环体
+        Cond cond = stmt.getCond();
+        Stmt bodyStmt = stmt.getStmt();
+
+        // 2. 创建关键基本块
+        // condBlock: 条件判断块
+        // bodyBlock: 循环体块
+        // exitBlock: 循环结束后的出口块
+        IRBasicBlock condBlock = createBasicBlock();
+        IRBasicBlock bodyBlock = createBasicBlock();
+        IRBasicBlock exitBlock = createBasicBlock();
+
+        // 3. 维护循环结构栈 (LoopStructure)
+        // 用于处理 break (跳转到 exitBlock) 和 continue (跳转到 condBlock)
+        // 注意：while循环的 updateBlock 就是 condBlock (因为没有专门的步进语句块)
+        LoopStructure loop = new LoopStructure(currentBasicBlock, condBlock, bodyBlock, condBlock, exitBlock);
+        loops.push(loop);
+        controlStack.push(loop);
+
+        // 4. 从当前块跳转到条件判断块
+        createJump(condBlock);
+        
+        // 5. 生成条件判断逻辑
+        // 在 condBlock 中计算条件，如果为真跳到 bodyBlock，否则跳到 exitBlock
+        currentBasicBlock = condBlock;
+        visitCond(cond, bodyBlock, exitBlock);
+
+        // 6. 生成循环体逻辑
+        currentBasicBlock = bodyBlock;
+        visitStmt(bodyStmt);
+
+        // 7.在循环体 bodyBlock 的末尾生成回跳指令 createJump 之前
+        // 应该检查 currentBasicBlock.isTerminated()
+        if (!currentBasicBlock.isTerminated()) {
+            createJump(condBlock);
+        }
+
+        // 8. 恢复上下文
+        // 循环结束后，控制流停在 exitBlock
+        currentBasicBlock = exitBlock;
+        loops.pop();
+        controlStack.pop();
     }
 
     /**
@@ -846,6 +1312,7 @@ public class Visitor extends IRInstructionFactory {
              */
         LoopStructure thisLoop = new LoopStructure(currentBasicBlock,condBlock,forBody,updateBlock,exitBlock);
         loops.push(thisLoop);
+        controlStack.push(thisLoop);
 
 
         // initBb 的创建由visitForStmt完成
@@ -878,6 +1345,7 @@ public class Visitor extends IRInstructionFactory {
         // exitBlock
         currentBasicBlock = exitBlock;
         loops.pop();
+        controlStack.pop();
     }
 
     /**
@@ -903,23 +1371,17 @@ public class Visitor extends IRInstructionFactory {
      * 'break' ';'
      */
     private void visitBreakStmt(BreakStmt stmt) {
-        /**
-         * 用恒定条件的 createBranch 保留了两个后继（exitBb 和 updateBb）
-         * 有利于构建/分析 CFG、优化和数据流分析
-         * 用 createJump 只会产生一个后继边
-         */
-        LoopStructure curLoop = loops.peek();
-        createBranch(
-                new IntegerConstant(IntegerType.I32,1)
-                ,curLoop.getExitBlock()
-                ,curLoop.getUpdateBlock());
-        /**
-         * 终结指令（jump/branch）一旦写入当前基本块，这个块就“结束”了
-         * 再往里追加指令会产生非法IR
-         * 把当前块切到一个哨兵块，能把后续生成的指令引流走，避免污染已终结块。
-         * 同时这些占位块也不会出现在最终函数的基本块列表里
-         * 因为它们不是通过 factory 的 createBasicBlock 注册的
-         */
+        Object top = controlStack.peek();
+        if (top instanceof LoopStructure) {
+            LoopStructure curLoop = (LoopStructure) top;
+            createBranch(
+                    new IntegerConstant(IntegerType.I32,1)
+                    ,curLoop.getExitBlock()
+                    ,curLoop.getUpdateBlock());
+        } else if (top instanceof SwitchStructure) {
+            SwitchStructure curSwitch = (SwitchStructure) top;
+            createJump(curSwitch.getExitBlock());
+        }
         currentBasicBlock = new IRBasicBlock(null,200000);
     }
 
@@ -927,12 +1389,19 @@ public class Visitor extends IRInstructionFactory {
      * 'continue' ';'
      */
     private void visitContinueStmt(ContinueStmt stmt) {
-        LoopStructure curLoop = loops.peek();
-        createBranch(
-                new IntegerConstant(IntegerType.I32,1)
-                ,curLoop.getUpdateBlock()
-                ,curLoop.getExitBlock()
-        );
+        Iterator<Object> it = controlStack.iterator();
+        while (it.hasNext()) {
+            Object obj = it.next();
+            if (obj instanceof LoopStructure) {
+                LoopStructure curLoop = (LoopStructure) obj;
+                createBranch(
+                        new IntegerConstant(IntegerType.I32,1)
+                        ,curLoop.getUpdateBlock()
+                        ,curLoop.getExitBlock()
+                );
+                break;
+            }
+        }
         currentBasicBlock = new IRBasicBlock(null,200001);
     }
 
@@ -1287,10 +1756,16 @@ public class Visitor extends IRInstructionFactory {
 
 
     /**
-     * Exp → AddExp
+     * 表达式求值入口
+     * 文法层级：Exp -> AddExp -> MulExp -> UnaryExp
      */
     public IRValue visitExp(Exp exp) {
-        return visitAddExp(exp.getAddExp());
+        AstNode child = exp.getChildren().get(0);
+        // 根据子节点类型分发到对应的处理方法
+        if (child instanceof AddExp) {
+            return visitAddExp((AddExp) child);
+        }
+        return null;
     }
 
     /**
@@ -1418,6 +1893,16 @@ public class Visitor extends IRInstructionFactory {
             return left / right;
         } else if (op != null && op.getNodeType() == SynType.MOD) {
             return left % right;
+        } else if (op != null && op.getNodeType() == SynType.BITANDK) {
+            return left & right;
+        } else if (op != null && op.getNodeType() == SynType.BITORK) {
+            return left | right;
+        } else if (op != null && op.getNodeType() == SynType.BITXORK) {
+            return left ^ right;
+        } else if (op != null && op.getNodeType() == SynType.SHLK) {
+            return left << right;
+        } else if (op != null && op.getNodeType() == SynType.ASHRK) {
+            return left >> right;
         } else {
             System.out.println("strange null op from calcMulExp");
             return 0;
@@ -1463,6 +1948,26 @@ public class Visitor extends IRInstructionFactory {
             return createBinaryOperation(
                     BinaryOperationInstruction.BinaryOperator.SREM,
                     left, right);
+        } else if (op != null && op.getNodeType() == SynType.BITANDK) {
+            return createBinaryOperation(
+                    BinaryOperationInstruction.BinaryOperator.BITAND,
+                    left, right);
+        } else if (op != null && op.getNodeType() == SynType.BITORK) {
+            return createBinaryOperation(
+                    BinaryOperationInstruction.BinaryOperator.BITOR,
+                    left, right);
+        } else if (op != null && op.getNodeType() == SynType.BITXORK) {
+            return createBinaryOperation(
+                    BinaryOperationInstruction.BinaryOperator.BITXOR,
+                    left, right);
+        } else if (op != null && op.getNodeType() == SynType.SHLK) {
+            return createBinaryOperation(
+                    BinaryOperationInstruction.BinaryOperator.SHL,
+                    left, right);
+        } else if (op != null && op.getNodeType() == SynType.ASHRK) {
+            return createBinaryOperation(
+                    BinaryOperationInstruction.BinaryOperator.ASHR,
+                    left, right);
         } else {
             System.out.println("strange null op from tackleMulExp");
             return null;
@@ -1471,7 +1976,8 @@ public class Visitor extends IRInstructionFactory {
 
     /**
      * UnaryExp → PrimaryExp | Ident '(' [FuncRParams] ')' | UnaryOp UnaryExp
-     * UnaryExp → PrimaryUnaryExp | FuncCallUnaryExp | UnaryExp
+     * UnaryExp → UnaryExp ('++' | '--')  // Postfix
+     * UnaryOp → '+' | '-' | '!' | '++' | '--'
      */
     public IRValue visitUnaryExp(UnaryExp unaryExp) {
         if (unaryExp instanceof PrimaryUnaryExp) {
@@ -1479,6 +1985,45 @@ public class Visitor extends IRInstructionFactory {
         } else if (unaryExp instanceof FuncCallUnaryExp) {
             return visitFunctionCall((FuncCallUnaryExp) unaryExp);
         } else {
+            // Check for Postfix: UnaryExp (INC/DEC)
+            ArrayList<AstNode> children = (ArrayList<AstNode>) unaryExp.getChildren();
+            if (children.size() == 2 && children.get(1) instanceof TokenNode) {
+                TokenNode op = (TokenNode) children.get(1);
+                UnaryExp inner = (UnaryExp) children.get(0);
+                
+                loadLVal = false;
+                IRValue ptr = visitUnaryExp(inner);
+                loadLVal = true;
+                
+                IRValue oldVal = createLoad(ptr);
+                int delta = (op.getNodeType() == SynType.INC) ? 1 : -1;
+                IRValue newVal = createBinaryOperation(BinaryOperationInstruction.BinaryOperator.ADD, 
+                                                     oldVal, new IntegerConstant(IntegerType.I32, delta));
+                createStore(newVal, ptr);
+                return oldVal;
+            }
+            
+            // Check for Prefix INC/DEC
+            // UnaryOp UnaryExp
+            UnaryOp opNode = unaryExp.getOperator();
+            if (opNode != null) {
+                TokenNode opToken = opNode.getOperator();
+                if (opToken.getTokenType() == SynType.INC || opToken.getTokenType() == SynType.DEC) {
+                    UnaryExp inner = unaryExp.getExpr();
+                    
+                    loadLVal = false;
+                    IRValue ptr = visitUnaryExp(inner);
+                    loadLVal = true;
+                    
+                    IRValue oldVal = createLoad(ptr);
+                    int delta = (opToken.getTokenType() == SynType.INC) ? 1 : -1;
+                    IRValue newVal = createBinaryOperation(BinaryOperationInstruction.BinaryOperator.ADD, 
+                                                         oldVal, new IntegerConstant(IntegerType.I32, delta));
+                    createStore(newVal, ptr);
+                    return newVal;
+                }
+            }
+            
             return visitUnaryOpExp(unaryExp);
         }
     }
@@ -1692,61 +2237,172 @@ public class Visitor extends IRInstructionFactory {
                 return value;
             }
         }
-        // 指向数组（[N x i32] 或 [N x i8]）
+        // 指向数组（[N x i32] 或 [N x i8] 或多维数组）
         if (pointeeType.isArrayType()) {
             if (culWhileCompiling) {
-                /**
-                 * 常量折叠场景：索引也是常量，直接返回初始化数组的某元素常量
-                 * C示例：int a[3] = {1,2,3};  const int k = a[1];  // 直接用 2
-                 */
-                int index = ((IntegerConstant)visitExp(exp)).getConstantValue();
+                // 常量折叠：计算线性索引
+                int totalIndex = 0;
+                // 获取当前维度的数组类型
+                ArrayType currentArrayType = (ArrayType) pointeeType;
+                
+                // 处理第一个索引
+                if (exp != null) {
+                    totalIndex = ((IntegerConstant)visitExp(exp)).getConstantValue();
+                }
+                
+                // 处理后续索引
+                for (int i = 1; i < lVal.getExps().size(); i++) {
+                    // 获取下一维度的元素数量
+                    if (currentArrayType.getElementType().isArrayType()) {
+                        currentArrayType = (ArrayType) currentArrayType.getElementType();
+                        int dimSize = currentArrayType.getArrayLenth(); // 这里的逻辑需要修正，应该是每一层的大小
+                        // 实际上ArrayType只知道自己的长度，不知道子元素的具体结构（除非递归）
+                        // 需要重新计算步长
+                        // 简单处理：假设我们已经到了最后一维，直接取值是不对的
+                        // 需要按照多维数组的线性化公式：idx = idx * dim_size + next_idx
+                    }
+                    // 这里逻辑比较复杂，因为ArrayType结构是嵌套的
+                    // [2 x [3 x i32]]
+                    // a[1][2] -> 1 * 3 + 2
+                }
+                
+                // 重新实现多维数组常量折叠逻辑
+                // 1. 获取所有维度的大小
+                ArrayList<Integer> dims = new ArrayList<>();
+                IRType temp = pointeeType;
+                while (temp instanceof ArrayType) {
+                    dims.add(((ArrayType) temp).getArrayLenth());
+                    temp = ((ArrayType) temp).getElementType();
+                }
+                
+                // 2. 获取所有索引值
+                ArrayList<Integer> indices = new ArrayList<>();
+                if (exp != null) indices.add(((IntegerConstant)visitExp(exp)).getConstantValue());
+                for (int i = 1; i < lVal.getExps().size(); i++) {
+                    indices.add(((IntegerConstant)visitExp(lVal.getExps().get(i))).getConstantValue());
+                }
+                
+                // 3. 计算线性偏移
+                int flatIndex = 0;
+                // 注意：dims的第一个维度（dims.get(0)）在计算中其实只作为上限检查（可选），
+                // 计算偏移时用到的是后续维度的大小。
+                // 比如 int a[2][3]; a[1][2] -> 1 * 3 + 2
+                
+                flatIndex = 0;
+                for (int i = 0; i < indices.size(); i++) {
+                    int stride = 1;
+                    // 计算当前维度之后的总步长
+                    for (int j = i + 1; j < dims.size(); j++) {
+                        stride *= dims.get(j);
+                    }
+                    flatIndex += indices.get(i) * stride;
+                }
 
                 if (value instanceof AllocaInstruction) {
                     AllocaInstruction alloca = (AllocaInstruction) value;
+                    // Check if initial value exists
+                    if (alloca.getInitialValue() == null) {
+                         // Uninitialized or zero-initialized by default?
+                         // If no initial value, we can assume 0 or return undefined.
+                         return new IntegerConstant(IntegerType.I32, 0); 
+                    }
                     ArrayConstant initArray = (ArrayConstant) alloca.getInitialValue();
-                    return initArray.getElementConstant(index);
+                    return initArray.getElementConstant(flatIndex);
                 }
                 if (value instanceof IRGlobalVariable) {
                     IRGlobalVariable globalVariable = (IRGlobalVariable) value;
+                    if (globalVariable.getInit() == null) {
+                        return new IntegerConstant(IntegerType.I32, 0);
+                    }
                     ArrayConstant initArray = (ArrayConstant) globalVariable.getInit();
-                    return initArray.getElementConstant(index);
+                    return initArray.getElementConstant(flatIndex);
                 }
             } else {
                 /**
-                 * 运行期地址计算：
-                 * - 无索引：数组名衰变为指针（GEP 到首元素）
-                 *   C示例：int a[3];  foo(a);  // 传递 &a[0]
-                 * - 有索引：计算 a[index] 的地址（GEP base, 0, index）
-                 *   C示例：int a[3];  use(a[1]);  // 取 &a[1]，上层按需 load
+                 * 运行期地址计算（多维数组 GEP）：
+                 * 生成一系列 GEP 指令或单个多索引 GEP 指令
                  */
-                if (exp == null) {
-                    GetElementPtrInstruction GEP = createGetElementPtr(value);
-                    return GEP;
-                } else {
-                    IRValue index = visitExp(exp);
-                    GetElementPtrInstruction GEP = createGetElementPtr(value,new IntegerConstant(IntegerType.I32,0),index);
-                    return GEP;
+                ArrayList<IRValue> indices = new ArrayList<>();
+                indices.add(new IntegerConstant(IntegerType.I32, 0)); // 第一个0用于解引用指针
+                
+                if (exp != null) {
+                    indices.add(visitExp(exp));
                 }
+                
+                for (int i = 1; i < lVal.getExps().size(); i++) {
+                    indices.add(visitExp(lVal.getExps().get(i)));
+                }
+                
+                // 如果索引数量少于维度数量，结果是指向子数组的指针
+                // 如果索引数量等于维度数量，结果是指向元素的指针
+                
+                // 自动Decay：如果提供的索引少于数组维度，自动补一个0，使数组名/子数组Decay为指向首元素的指针
+                int dimCount = 0;
+                IRType temp = pointeeType;
+                while (temp instanceof ArrayType) {
+                    dimCount++;
+                    temp = ((ArrayType) temp).getElementType();
+                }
+                
+                int providedCount = lVal.getExps().size();
+                if (providedCount < dimCount) {
+                    indices.add(new IntegerConstant(IntegerType.I32, 0));
+                }
+                
+                return createGetElementPtr(value, indices);
             }
         }
-        // 指向指针（例如形参为"指向数组的指针"，函数内部再按索引访问）
+        // 指向指针（函数参数中的多维数组，如 int a[][3] -> [3 x i32]*）
         if (pointeeType.isPointerType()) {
-            /**
-             * 典型于函数内部的"指针的指针"场景：
-             * - 无索引：先从指针的指针中 load 出数组指针（用于继续传参）
-             *   C示例：void f(int *p[]) { g(p); }  // 从 p 的地址中取出 p，再传给 g
-             * - 有索引：先 load 出数组指针，再对元素做 GEP
-             *   C示例：void f(int *p[]) { use(p[i]); }  // p 是指向首元素的指针，p[i] 需要 GEP
-             */
-            if (exp == null) {
-                LoadInstruction array = createLoad(value);
-                return array;
+            // 先load出基地址
+            LoadInstruction baseAddr = createLoad(value);
+            
+            ArrayList<IRValue> indices = new ArrayList<>();
+            // 注意：对于指针指向的数组，第一个索引就是第一维的偏移，不需要额外的0
+            
+            if (exp != null) {
+                indices.add(visitExp(exp));
             } else {
-                LoadInstruction array = createLoad(value);
-                IRValue index = visitExp(exp);
-                GetElementPtrInstruction GEP = createGetElementPtr(array,index);
-                return GEP;
+                // 如果没有提供任何索引，直接返回加载出的指针
+                return baseAddr;
             }
+            
+            for (int i = 1; i < lVal.getExps().size(); i++) {
+                indices.add(visitExp(lVal.getExps().get(i)));
+            }
+            
+            // 自动Decay：计算维度（包括指针本身的一维）
+            int dimCount = 1; // 指针本身算一维
+            IRType temp = ((PointerType) value.getType()).getPointeeType(); // baseAddr type is same as value type (loaded pointer)
+            // Wait, baseAddr is loaded value. value is alloca (pointer to pointer).
+            // pointeeType variable in this method is ((PointerType)value.getType()).getPointeeType() -> i32* or [3xi32]*
+            
+            temp = pointeeType;
+            if (temp instanceof PointerType) {
+                 // baseAddr is the pointer.
+                 temp = ((PointerType) temp).getPointeeType();
+            }
+            // Now temp is the element type of the pointer (e.g. i32 or [3xi32])
+            
+            while (temp instanceof ArrayType) {
+                dimCount++;
+                temp = ((ArrayType) temp).getElementType();
+            }
+            
+            // 用户提供的索引数量 (在indices中)
+            // indices 包含第一个索引（如果exp!=null）和后续索引
+            // 注意：对于指针访问，第一个索引是指针偏移。
+            // int a[] -> a[i] -> GEP a, i.
+            // int a[][3] -> a[i][j] -> GEP a, i, j.
+            
+            // 如果 int a[][3]. use a[i]. indices=[i]. provided=1. dim=2 ([3xi32]*).
+            // Need GEP a, i, 0.
+            
+            if (indices.size() < dimCount) {
+                indices.add(new IntegerConstant(IntegerType.I32, 0));
+            }
+            
+            return createGetElementPtr(baseAddr, indices);
         }
 
         return null;
@@ -1836,16 +2492,12 @@ public class Visitor extends IRInstructionFactory {
         // 1. 为形参分配栈空间
         AllocaInstruction alloc = createAlloca(integerType);
 
-        /**
-         * 2. 符号表中存储alloca，而不是FParam
-         *   1. FParam 是值， alloca 是地址
-         *   2. 变量需要的是可读写的内存位置，而不是只读的值
-         *   3. 保证形参和局部变量的使用方式完全一致
-         */
+        // 2. 符号表中存储alloca，而不是FParam
         String name = ((FuncFParam)funcFParam).getParamName();
         curSymbolTable.insertSymbol(name, alloc);
 
         // 3. 将FParam的值存储到alloca中
+        // 对于多维数组参数，integerType已经是PointerType了
         IRFunctionParameter param = currentFunction.getParameters().get(paramIndex);
         createStore(param,alloc);
     }

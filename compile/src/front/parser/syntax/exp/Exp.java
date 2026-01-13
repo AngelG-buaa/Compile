@@ -16,9 +16,7 @@ public class Exp extends BranchNode {
 
     @Override
     public void appendChild(AstNode child) {
-        if (child.getNodeType() != SynType.AddExp) {
-            System.out.println("Exp with a wrong child");
-        } else {
+        if (child instanceof AddExp) {
             addExp = (AddExp) child;
         }
         super.appendChild(child);

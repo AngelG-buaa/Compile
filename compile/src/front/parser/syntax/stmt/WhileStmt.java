@@ -1,15 +1,18 @@
 package front.parser.syntax.stmt;
 
 import front.parser.syntax.AstNode;
-import front.parser.syntax.BranchNode;
 import front.parser.syntax.exp.Cond;
 
 /**
- * 'repeat' Stmt 'until' '(' Cond ')' ';'
+ * WhileStmt → 'while' '(' Cond ')' Stmt
  */
-public class RepeatStmt extends Stmt {
-    private Stmt stmt;
+public class WhileStmt extends Stmt {
     private Cond cond;
+    private Stmt stmt;
+
+    public WhileStmt() {
+        super();
+    }
 
     @Override
     public void appendChild(AstNode child) {
@@ -21,11 +24,11 @@ public class RepeatStmt extends Stmt {
         }
     }
 
-    public Stmt getStmt() {
-        return stmt;
-    }
-
     public Cond getCond() {
         return cond;
+    }
+
+    public Stmt getStmt() {
+        return stmt;
     }
 }

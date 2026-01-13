@@ -196,7 +196,8 @@ public class Parser {
     }
 
     /**
-     * ConstDef → Ident [ '[' ConstExp ']' ] '=' ConstInitVal
+     * ConstDef → Ident { '[' ConstExp ']' } '=' ConstInitVal
+     * 支持多维常量数组
      */
     private ConstDef parseConstDef() {
         ConstDef constDef = new ConstDef();
@@ -204,8 +205,8 @@ public class Parser {
         // Ident
         constDef.appendChild(expectToken(SynType.IDENFR, null));
 
-        // 可选的数组维度
-        if (getCurrentTokenType() == SynType.LBRACK) {
+        // { '[' ConstExp ']' }
+        while (getCurrentTokenType() == SynType.LBRACK) {
             constDef.appendChild(consumeToken()); // 消费 '['
             constDef.appendChild(parseConstExp());
             // ']' - 错误类型 k: 缺少右中括号
@@ -221,21 +222,21 @@ public class Parser {
     }
 
     /**
-     * ConstInitVal → ConstExp | '{' [ ConstExp { ',' ConstExp } ] '}'
+     * ConstInitVal → ConstExp | '{' [ ConstInitVal { ',' ConstInitVal } ] '}'
      */
     private ConstInitVal parseConstInitVal() {
         ConstInitVal constInitVal = new ConstInitVal();
         
         if (getCurrentTokenType() == SynType.LBRACE) {
-            // '{' [ ConstExp { ',' ConstExp } ] '}'
+            // '{' [ ConstInitVal { ',' ConstInitVal } ] '}'
             constInitVal.appendChild(consumeToken()); // '{'
             
             if (getCurrentTokenType() != SynType.RBRACE) {
-                constInitVal.appendChild(parseConstExp());
+                constInitVal.appendChild(parseConstInitVal());
                 
                 while (getCurrentTokenType() == SynType.COMMA) {
                     constInitVal.appendChild(consumeToken()); // ','
-                    constInitVal.appendChild(parseConstExp());
+                    constInitVal.appendChild(parseConstInitVal());
                 }
             }
             
@@ -278,7 +279,8 @@ public class Parser {
     }
 
     /**
-     * VarDef → Ident [ '[' ConstExp ']' ] | Ident [ '[' ConstExp ']' ] '=' InitVal
+     * VarDef → Ident { '[' ConstExp ']' } | Ident { '[' ConstExp ']' } '=' InitVal
+     * 支持多维数组定义
      */
     private VarDef parseVarDef() {
         VarDef varDef = new VarDef();
@@ -286,8 +288,8 @@ public class Parser {
         // Ident
         varDef.appendChild(expectToken(SynType.IDENFR, null));
 
-        // [ '[' ConstExp ']' ]
-        if (getCurrentTokenType() == SynType.LBRACK) {
+        // { '[' ConstExp ']' }
+        while (getCurrentTokenType() == SynType.LBRACK) {
             varDef.appendChild(consumeToken()); // '['
             varDef.appendChild(parseConstExp());
             // ']' - 错误类型 k: 缺少右中括号
@@ -297,6 +299,11 @@ public class Parser {
         // [ '=' InitVal ]
         if (getCurrentTokenType() == SynType.ASSIGN) {
             varDef.appendChild(consumeToken()); // '='
+            if (getCurrentTokenType() == SynType.GETINTTK) {
+                varDef.appendChild(consumeToken()); // 'getint'
+                varDef.appendChild(expectToken(SynType.LPARENT, null));
+                varDef.appendChild(expectToken(SynType.RPARENT, null));
+            }
             varDef.appendChild(parseInitVal());
         }
 
@@ -304,21 +311,21 @@ public class Parser {
     }
 
     /**
-     * InitVal → Exp | '{' [ Exp { ',' Exp } ] '}'
+     * InitVal → Exp | '{' [ InitVal { ',' InitVal } ] '}'
      */
     private InitVal parseInitVal() {
         InitVal initVal = new InitVal();
         
         if (getCurrentTokenType() == SynType.LBRACE) {
-            // '{' [ Exp { ',' Exp } ] '}'
+            // '{' [ InitVal { ',' InitVal } ] '}'
             initVal.appendChild(consumeToken()); // '{'
             
             if (getCurrentTokenType() != SynType.RBRACE) {
-                initVal.appendChild(parseExp());
+                initVal.appendChild(parseInitVal());
                 
                 while (getCurrentTokenType() == SynType.COMMA) {
                     initVal.appendChild(consumeToken()); // ','
-                    initVal.appendChild(parseExp());
+                    initVal.appendChild(parseInitVal());
                 }
             }
             
@@ -417,10 +424,16 @@ public class Parser {
     }
 
     /**
-     * FuncFParam → BType Ident ['[' ']']
+     * FuncFParam → [const] BType Ident ['[' ']' { '[' ConstExp ']' }]
+     * 支持const参数和多维数组参数
      */
     private FuncFParam parseFuncFParam() {
         FuncFParam funcFParam = new FuncFParam();
+
+        // [const] - 虽然SysY标准可能不强制，但C语言支持
+        if (getCurrentTokenType() == SynType.CONSTTK) {
+             funcFParam.appendChild(consumeToken());
+        }
 
         // BType
         funcFParam.appendChild(parseBType());
@@ -428,11 +441,18 @@ public class Parser {
         // Ident
         funcFParam.appendChild(expectToken(SynType.IDENFR, null));
 
-        // ['[' ']']
+        // ['[' ']' { '[' ConstExp ']' }]
         if (getCurrentTokenType() == SynType.LBRACK) {
             funcFParam.appendChild(consumeToken()); // '['
             // ']' - 错误类型 k: 缺少右中括号
             funcFParam.appendChild(expectToken(SynType.RBRACK, ErrorType.MISS_RBRACK));
+            
+            // 多维部分
+            while (getCurrentTokenType() == SynType.LBRACK) {
+                funcFParam.appendChild(consumeToken()); // '['
+                funcFParam.appendChild(parseConstExp());
+                funcFParam.appendChild(expectToken(SynType.RBRACK, ErrorType.MISS_RBRACK));
+            }
         }
 
         return funcFParam;
@@ -492,6 +512,18 @@ public class Parser {
             case IFTK:
                 return parseIfStmt();
                 
+            case SWITCHTK:
+                return parseSwitchStmt();
+                
+            case DOTK:
+                return parseDoWhileStmt();
+
+            case WHILETK:
+                return parseWhileStmt();
+                
+            case GOTOTK:
+                return parseGotoStmt();
+                
             case FORTK:
                 return parseForLoopStmt();
                 
@@ -510,8 +542,15 @@ public class Parser {
             case REPEATTK:
                 return parseRepeatStmt();
                 
+            case CASETK:
+            case DEFAULTTK:
+                return parseCaseStmt();
+
             case IDENFR:
-                // 需要向前看判断是赋值语句还是表达式语句
+                // 需要向前看判断是赋值语句、标签语句还是表达式语句
+                if (getTokenType(1) == SynType.COLON) {
+                    return parseLabelStmt();
+                }
                 return parseAssignOrExpStmt();
                 
             default:
@@ -528,7 +567,9 @@ public class Parser {
         int lookAhead = 0;
         while (getTokenType(lookAhead) != SynType.ASSIGN &&
                 getTokenType(lookAhead) != SynType.SEMICN &&
-                getTokenType(lookAhead) != SynType.EOF) {
+                getTokenType(lookAhead) != SynType.EOF &&
+                getTokenType(lookAhead) != SynType.INC &&
+                getTokenType(lookAhead) != SynType.DEC) {
             lookAhead++;
         }
 
@@ -541,6 +582,18 @@ public class Parser {
             // ';' - 错误类型 i: 缺少分号
             assignStmt.appendChild(expectToken(SynType.SEMICN, ErrorType.MISS_SEMICN));
             return assignStmt;
+        } else if (getTokenType(lookAhead) == SynType.INC) {
+            IncStmt incStmt = new IncStmt();
+            incStmt.appendChild(parseLVal());
+            incStmt.appendChild(expectToken(SynType.INC, null));
+            incStmt.appendChild(expectToken(SynType.SEMICN, ErrorType.MISS_SEMICN));
+            return incStmt;
+        } else if (getTokenType(lookAhead) == SynType.DEC) {
+            DecStmt decStmt = new DecStmt();
+            decStmt.appendChild(parseLVal());
+            decStmt.appendChild(expectToken(SynType.DEC, null));
+            decStmt.appendChild(expectToken(SynType.SEMICN, ErrorType.MISS_SEMICN));
+            return decStmt;
         } else {
             // 表达式语句
             return parseExpStmt();
@@ -692,6 +745,136 @@ public class Parser {
     }
 
     /**
+     * SwitchStmt → 'switch' '(' Exp ')' Stmt
+     */
+    private SwitchStmt parseSwitchStmt() {
+        SwitchStmt switchStmt = new SwitchStmt();
+        
+        // 'switch'
+        switchStmt.appendChild(expectToken(SynType.SWITCHTK, null));
+        
+        // '('
+        switchStmt.appendChild(expectToken(SynType.LPARENT, null));
+        
+        // Exp
+        switchStmt.appendChild(parseExp());
+        
+        // ')'
+        switchStmt.appendChild(expectToken(SynType.RPARENT, ErrorType.MISS_RPARENT));
+        
+        // Stmt
+        switchStmt.appendChild(parseStmt());
+        
+        return switchStmt;
+    }
+
+    /**
+     * CaseStmt → 'case' ConstExp ':' Stmt | 'default' ':' Stmt
+     */
+    private CaseStmt parseCaseStmt() {
+        CaseStmt caseStmt = new CaseStmt();
+        
+        if (getCurrentTokenType() == SynType.CASETK) {
+            // 'case'
+            caseStmt.appendChild(consumeToken());
+            // ConstExp
+            caseStmt.appendChild(parseConstExp());
+            // ':'
+            caseStmt.appendChild(expectToken(SynType.COLON, null));
+            // Stmt
+            caseStmt.appendChild(parseStmt());
+        } else {
+            // 'default'
+            caseStmt.appendChild(expectToken(SynType.DEFAULTTK, null));
+            // ':'
+            caseStmt.appendChild(expectToken(SynType.COLON, null));
+            // Stmt
+            caseStmt.appendChild(parseStmt());
+        }
+        
+        return caseStmt;
+    }
+
+    /**
+     * DoWhileStmt → 'do' Stmt 'while' '(' Cond ')' ';'
+     */
+    private DoWhileStmt parseDoWhileStmt() {
+        DoWhileStmt doWhileStmt = new DoWhileStmt();
+        
+        // 'do'
+        doWhileStmt.appendChild(expectToken(SynType.DOTK, null));
+        
+        // Stmt
+        doWhileStmt.appendChild(parseStmt());
+        
+        // 'while'
+        doWhileStmt.appendChild(expectToken(SynType.WHILETK, null));
+        
+        // '('
+        doWhileStmt.appendChild(expectToken(SynType.LPARENT, null));
+        
+        // Cond
+        doWhileStmt.appendChild(parseCond());
+        
+        // ')'
+        doWhileStmt.appendChild(expectToken(SynType.RPARENT, ErrorType.MISS_RPARENT));
+        
+        // ';'
+        doWhileStmt.appendChild(expectToken(SynType.SEMICN, ErrorType.MISS_SEMICN));
+        
+        return doWhileStmt;
+    }
+
+    /**
+     * WhileStmt → 'while' '(' Cond ')' Stmt
+     */
+    private WhileStmt parseWhileStmt() {
+        WhileStmt whileStmt = new WhileStmt();
+        whileStmt.appendChild(expectToken(SynType.WHILETK, null));
+        whileStmt.appendChild(expectToken(SynType.LPARENT, null));
+        whileStmt.appendChild(parseCond());
+        whileStmt.appendChild(expectToken(SynType.RPARENT, ErrorType.MISS_RPARENT));
+        whileStmt.appendChild(parseStmt());
+        return whileStmt;
+    }
+
+    /**
+     * GotoStmt → 'goto' Ident ';'
+     */
+    private GotoStmt parseGotoStmt() {
+        GotoStmt gotoStmt = new GotoStmt();
+        
+        // 'goto'
+        gotoStmt.appendChild(expectToken(SynType.GOTOTK, null));
+        
+        // Ident
+        gotoStmt.appendChild(expectToken(SynType.IDENFR, null));
+        
+        // ';'
+        gotoStmt.appendChild(expectToken(SynType.SEMICN, ErrorType.MISS_SEMICN));
+        
+        return gotoStmt;
+    }
+
+    /**
+     * LabelStmt → Ident ':' Stmt
+     */
+    private LabelStmt parseLabelStmt() {
+        LabelStmt labelStmt = new LabelStmt();
+        
+        // Ident
+        labelStmt.appendChild(expectToken(SynType.IDENFR, null));
+        
+        // ':'
+        labelStmt.appendChild(expectToken(SynType.COLON, null));
+        
+        // Stmt
+        labelStmt.appendChild(parseStmt());
+        
+        return labelStmt;
+    }
+
+    /**
      * 'return' [Exp] ';'
      */
     private ReturnStmt parseReturnStmt() {
@@ -752,6 +935,10 @@ public class Parser {
 
     /**
      * Cond → LOrExp
+     * 注意：在SysY中Cond用于if/while，通常是LOrExp。
+     * 但如果支持三元运算符，CondExp已经包含了LOrExp。
+     * 为了兼容性，Cond仍解析LOrExp，或者解析CondExp?
+     * 标准SysY定义Cond -> LOrExp。这里保持不变，因为CondExp向下兼容LOrExp。
      */
     private Cond parseCond() {
         Cond cond = new Cond();
@@ -760,7 +947,33 @@ public class Parser {
     }
 
     /**
-     * LVal → Ident ['[' Exp ']']
+     * CondExp → LOrExp [ '?' Exp ':' CondExp ]
+     * 支持三元运算符
+     */
+    private BranchNode parseCondExp() {
+        BranchNode condExp = new BranchNode(SynType.Exp); // 使用Exp类型或新建CondExp类型
+        // 这里复用Exp类型或AddExp类型可能会导致混淆，最好新建CondExp类型。
+        // 但为了AST兼容性，暂且假设它返回LOrExp或包装节点。
+        // 实际上Exp -> CondExp，所以Exp节点下挂CondExp。
+        
+        BranchNode lOrExp = parseLOrExp();
+        
+        if (getCurrentTokenType() == SynType.QUESTION) {
+            BranchNode ternaryExp = new BranchNode(SynType.Cond); // 借用Cond类型或新建
+            ternaryExp.appendChild(lOrExp);
+            ternaryExp.appendChild(consumeToken()); // '?'
+            ternaryExp.appendChild(parseExp());
+            ternaryExp.appendChild(expectToken(SynType.COLON, null));
+            ternaryExp.appendChild(parseCondExp());
+            return ternaryExp;
+        }
+        
+        return lOrExp;
+    }
+
+    /**
+     * LVal → Ident {'[' Exp ']'}
+     * 支持多维数组访问
      */
     private LVal parseLVal() {
         LVal lVal = new LVal();
@@ -768,8 +981,8 @@ public class Parser {
         // Ident
         lVal.appendChild(expectToken(SynType.IDENFR, null));
         
-        // ['[' Exp ']']
-        if (getCurrentTokenType() == SynType.LBRACK) {
+        // {'[' Exp ']'}
+        while (getCurrentTokenType() == SynType.LBRACK) {
             lVal.appendChild(consumeToken()); // '['
             lVal.appendChild(parseExp());
             lVal.appendChild(expectToken(SynType.RBRACK, ErrorType.MISS_RBRACK));
@@ -816,17 +1029,23 @@ public class Parser {
 
     /**
      * UnaryExp → PrimaryExp | Ident '(' [FuncRParams] ')' | UnaryOp UnaryExp
+     *           | UnaryExp '++' | UnaryExp '--' (后缀)
      */
     private UnaryExp parseUnaryExp() {
         SynType currentType = getCurrentTokenType();
         
-        if (currentType == SynType.PLUS || currentType == SynType.MINU || currentType == SynType.NOT) {
-            // UnaryOp UnaryExp
+        if (currentType == SynType.PLUS || currentType == SynType.MINU || currentType == SynType.NOT ||
+            currentType == SynType.INC || currentType == SynType.DEC) {
+            // UnaryOp UnaryExp (包括前缀 ++/--)
             UnaryExp unaryExp = new UnaryExp();
             unaryExp.appendChild(parseUnaryOp());
             unaryExp.appendChild(parseUnaryExp());
             return unaryExp;
-        } else if (currentType == SynType.IDENFR && getTokenType(1) == SynType.LPARENT) {
+        } 
+        
+        UnaryExp unaryExpResult;
+        
+        if (currentType == SynType.IDENFR && getTokenType(1) == SynType.LPARENT) {
             // Ident '(' [FuncRParams] ')'
             FuncCallUnaryExp funcCallExp = new FuncCallUnaryExp();
             funcCallExp.appendChild(consumeToken()); // Ident
@@ -838,23 +1057,34 @@ public class Parser {
             }
             
             funcCallExp.appendChild(expectToken(SynType.RPARENT, ErrorType.MISS_RPARENT));
-            return funcCallExp;
+            unaryExpResult = funcCallExp;
         } else {
             // PrimaryExp
             PrimaryUnaryExp primaryUnaryExp = new PrimaryUnaryExp();
             primaryUnaryExp.appendChild(parsePrimaryExp());
-            return primaryUnaryExp;
+            unaryExpResult = primaryUnaryExp;
         }
+        
+        // 处理后缀 ++/--
+        while (getCurrentTokenType() == SynType.INC || getCurrentTokenType() == SynType.DEC) {
+            UnaryExp postfixExp = new UnaryExp(); // 包装成UnaryExp
+            postfixExp.appendChild(unaryExpResult);
+            postfixExp.appendChild(consumeToken()); // ++ or --
+            unaryExpResult = postfixExp;
+        }
+        
+        return unaryExpResult;
     }
 
     /**
-     * UnaryOp → '+' | '−' | '!'
+     * UnaryOp → '+' | '−' | '!' | '++' | '--'
      */
     private UnaryOp parseUnaryOp() {
         UnaryOp unaryOp = new UnaryOp();
         
         SynType currentType = getCurrentTokenType();
-        if (currentType == SynType.PLUS || currentType == SynType.MINU || currentType == SynType.NOT) {
+        if (currentType == SynType.PLUS || currentType == SynType.MINU || currentType == SynType.NOT ||
+            currentType == SynType.INC || currentType == SynType.DEC) {
             unaryOp.appendChild(consumeToken());
         }
         
@@ -881,22 +1111,20 @@ public class Parser {
 
     /**
      * MulExp → UnaryExp | MulExp ('*' | '/' | '%') UnaryExp
+     * 修正：移除了位运算，因为优先级不同
      */
     private MulExp parseMulExp() {
         MulExp mulExp = new MulExp();
         mulExp.appendChild(parseUnaryExp());
         
-        while (true) {
-            SynType currentType = getCurrentTokenType();
-            if (currentType == SynType.MULT || currentType == SynType.DIV || currentType == SynType.MOD) {
-                MulExp newMulExp = new MulExp();
-                newMulExp.appendChild(mulExp);
-                newMulExp.appendChild(consumeToken()); // 操作符
-                newMulExp.appendChild(parseUnaryExp());
-                mulExp = newMulExp;
-            } else {
-                break;
-            }
+        while (getCurrentTokenType() == SynType.MULT
+                || getCurrentTokenType() == SynType.DIV
+                || getCurrentTokenType() == SynType.MOD) {
+            MulExp newMulExp = new MulExp();
+            newMulExp.appendChild(mulExp);
+            newMulExp.appendChild(consumeToken());
+            newMulExp.appendChild(parseUnaryExp());
+            mulExp = newMulExp;
         }
         
         return mulExp;
@@ -909,84 +1137,131 @@ public class Parser {
         AddExp addExp = new AddExp();
         addExp.appendChild(parseMulExp());
         
-        while (true) {
-            SynType currentType = getCurrentTokenType();
-            if (currentType == SynType.PLUS || currentType == SynType.MINU) {
-                AddExp newAddExp = new AddExp();
-                newAddExp.appendChild(addExp);
-                newAddExp.appendChild(consumeToken()); // 操作符
-                newAddExp.appendChild(parseMulExp());
-                addExp = newAddExp;
-            } else {
-                break;
-            }
+        while (getCurrentTokenType() == SynType.PLUS || getCurrentTokenType() == SynType.MINU) {
+            AddExp newAddExp = new AddExp();
+            newAddExp.appendChild(addExp);
+            newAddExp.appendChild(consumeToken()); // 操作符
+            newAddExp.appendChild(parseMulExp());
+            addExp = newAddExp;
         }
         
         return addExp;
     }
 
     /**
-     * RelExp → AddExp | RelExp ('<' | '>' | '<=' | '>=') AddExp
-     * 左递归消除后: RelExp → AddExp { ('<' | '>' | '<=' | '>=') AddExp }
+     * ShiftExp → AddExp { ('<<' | '>>') AddExp }
+     * 新增层级
+     */
+    private BranchNode parseShiftExp() {
+        BranchNode node = parseAddExp();
+        
+        while (getCurrentTokenType() == SynType.SHLK || getCurrentTokenType() == SynType.ASHRK) {
+            BranchNode newNode = new BranchNode(SynType.Exp); // 使用通用Exp类型
+            newNode.appendChild(node);
+            newNode.appendChild(consumeToken());
+            newNode.appendChild(parseAddExp());
+            node = newNode;
+        }
+        
+        return node;
+    }
+
+    /**
+     * RelExp → ShiftExp { ('<' | '>' | '<=' | '>=') ShiftExp }
+     * 修正：调用ShiftExp
      */
     private RelExp parseRelExp() {
         RelExp relExp = new RelExp();
-        relExp.appendChild(parseAddExp());
+        relExp.appendChild(parseShiftExp());
         
-        while (true) {
-            SynType currentType = getCurrentTokenType();
-            if (currentType == SynType.LSS || currentType == SynType.GRE || 
-                currentType == SynType.LEQ || currentType == SynType.GEQ) {
-                RelExp newRelExp = new RelExp();
-                newRelExp.appendChild(relExp);
-                newRelExp.appendChild(consumeToken()); // 操作符
-                newRelExp.appendChild(parseAddExp());
-                relExp = newRelExp;
-            } else {
-                break;
-            }
+        while (getCurrentTokenType() == SynType.LSS || getCurrentTokenType() == SynType.GRE || 
+               getCurrentTokenType() == SynType.LEQ || getCurrentTokenType() == SynType.GEQ) {
+            RelExp newRelExp = new RelExp();
+            newRelExp.appendChild(relExp);
+            newRelExp.appendChild(consumeToken()); // 操作符
+            newRelExp.appendChild(parseShiftExp());
+            relExp = newRelExp;
         }
         
         return relExp;
     }
 
     /**
-     * EqExp → RelExp | EqExp ('==' | '!=') RelExp
-     * 左递归消除后: EqExp → RelExp { ('==' | '!=') RelExp }
+     * EqExp → RelExp { ('==' | '!=') RelExp }
      */
     private EqExp parseEqExp() {
         EqExp eqExp = new EqExp();
         eqExp.appendChild(parseRelExp());
         
-        while (true) {
-            SynType currentType = getCurrentTokenType();
-            if (currentType == SynType.EQL || currentType == SynType.NEQ) {
-                EqExp newEqExp = new EqExp();
-                newEqExp.appendChild(eqExp);
-                newEqExp.appendChild(consumeToken()); // 操作符
-                newEqExp.appendChild(parseRelExp());
-                eqExp = newEqExp;
-            } else {
-                break;
-            }
+        while (getCurrentTokenType() == SynType.EQL || getCurrentTokenType() == SynType.NEQ) {
+            EqExp newEqExp = new EqExp();
+            newEqExp.appendChild(eqExp);
+            newEqExp.appendChild(consumeToken()); // 操作符
+            newEqExp.appendChild(parseRelExp());
+            eqExp = newEqExp;
         }
         
         return eqExp;
     }
 
     /**
-     * LAndExp → EqExp | LAndExp '&&' EqExp
-     * 左递归消除后: LAndExp → EqExp { '&&' EqExp }
+     * BitAndExp → EqExp { '&' EqExp }
+     */
+    private BranchNode parseBitAndExp() {
+        BranchNode node = parseEqExp();
+        while (getCurrentTokenType() == SynType.BITANDK) {
+            BranchNode newNode = new BranchNode(SynType.Exp);
+            newNode.appendChild(node);
+            newNode.appendChild(consumeToken());
+            newNode.appendChild(parseEqExp());
+            node = newNode;
+        }
+        return node;
+    }
+
+    /**
+     * BitXorExp → BitAndExp { '^' BitAndExp }
+     */
+    private BranchNode parseBitXorExp() {
+        BranchNode node = parseBitAndExp();
+        while (getCurrentTokenType() == SynType.BITXORK) {
+            BranchNode newNode = new BranchNode(SynType.Exp);
+            newNode.appendChild(node);
+            newNode.appendChild(consumeToken());
+            newNode.appendChild(parseBitAndExp());
+            node = newNode;
+        }
+        return node;
+    }
+
+    /**
+     * BitOrExp → BitXorExp { '|' BitXorExp }
+     */
+    private BranchNode parseBitOrExp() {
+        BranchNode node = parseBitXorExp();
+        while (getCurrentTokenType() == SynType.BITORK) {
+            BranchNode newNode = new BranchNode(SynType.Exp);
+            newNode.appendChild(node);
+            newNode.appendChild(consumeToken());
+            newNode.appendChild(parseBitXorExp());
+            node = newNode;
+        }
+        return node;
+    }
+
+    /**
+     * LAndExp → BitOrExp { '&&' BitOrExp }
+     * 修正：调用BitOrExp
      */
     private LAndExp parseLAndExp() {
         LAndExp lAndExp = new LAndExp();
-        lAndExp.appendChild(parseEqExp());
+        lAndExp.appendChild(parseBitOrExp());
         
         while (getCurrentTokenType() == SynType.AND) {
             LAndExp newLAndExp = new LAndExp();
             newLAndExp.appendChild(lAndExp);
             newLAndExp.appendChild(consumeToken()); // '&&'
-            newLAndExp.appendChild(parseEqExp());
+            newLAndExp.appendChild(parseBitOrExp());
             lAndExp = newLAndExp;
         }
         
@@ -994,8 +1269,7 @@ public class Parser {
     }
 
     /**
-     * LOrExp → LAndExp | LOrExp '||' LAndExp
-     * 左递归消除后: LOrExp → LAndExp { '||' LAndExp }
+     * LOrExp → LAndExp { '||' LAndExp }
      */
     private LOrExp parseLOrExp() {
         LOrExp lOrExp = new LOrExp();

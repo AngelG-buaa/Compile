@@ -7,12 +7,7 @@ import front.parser.syntax.*;
 import front.parser.syntax.decl.*;
 import front.parser.syntax.exp.*;
 import front.parser.syntax.func.*;
-import front.parser.syntax.stmt.Block;
-import front.parser.syntax.stmt.BlockItem;
-import front.parser.syntax.stmt.ForLoopStmt;
-import front.parser.syntax.stmt.ForStmt;
-import front.parser.syntax.stmt.ReturnStmt;
-import front.parser.syntax.stmt.Stmt;
+import front.parser.syntax.stmt.*;
 import middle.checker.symbol.*;
 
 import java.util.ArrayList;
@@ -38,6 +33,7 @@ import static utils.GetExpType.getExpType;
 public class Checker {
     private static boolean voidFunc = false;
     private static int loopNum = 0;
+    private static int switchNum = 0;
 
     /**
      * 语义分析入口方法
@@ -134,11 +130,14 @@ public class Checker {
      * @param constInitVal 常量初始化值节点
      */
     private static void visitConstInitVal(BranchNode constInitVal) {
-        ArrayList<ConstExp> constExps = ((ConstInitVal) constInitVal).getExps();
-
-        if (constExps != null) {
-            for (ConstExp constExp : constExps) {
-                visitConstExp(constExp);
+        ConstInitVal node = (ConstInitVal) constInitVal;
+        if (node.isLeaf()) {
+            if (node.getConstExp() != null) {
+                visitConstExp(node.getConstExp());
+            }
+        } else {
+            for (ConstInitVal child : node.getInitVals()) {
+                visitConstInitVal(child);
             }
         }
     }
@@ -425,6 +424,45 @@ public class Checker {
         boolean isAssignStmt = children.stream().anyMatch(child -> child.getNodeType() == SynType.LVal) &&
                               children.stream().anyMatch(child -> child.getNodeType() == SynType.ASSIGN);
 
+        // ========== Switch语句处理 ==========
+        if (stmt instanceof SwitchStmt) {
+            SwitchStmt switchStmt = (SwitchStmt) stmt;
+            visitExp(switchStmt.getExp());
+            
+            switchNum++;
+            visitStmt(switchStmt.getStmt());
+            switchNum--;
+            return;
+        }
+
+        // ========== While循环处理 ==========
+        if (stmt instanceof WhileStmt) {
+            WhileStmt whileStmt = (WhileStmt) stmt;
+            visitCond(whileStmt.getCond());
+            
+            loopNum++;
+            visitStmt(whileStmt.getStmt());
+            loopNum--;
+            return;
+        }
+
+        // ========== Do-While循环处理 ==========
+        if (stmt instanceof DoWhileStmt) {
+            DoWhileStmt doWhileStmt = (DoWhileStmt) stmt;
+            
+            loopNum++;
+            visitStmt(doWhileStmt.getStmt());
+            loopNum--;
+            
+            visitCond(doWhileStmt.getCond());
+            return;
+        }
+
+        // ========== Goto语句处理 ==========
+        if (stmt instanceof GotoStmt) {
+            return;
+        }
+
         // ========== Block语句处理 ==========
         // 文法：Stmt → Block
         // AST结构：Stmt -> Block -> { BlockItem* }
@@ -488,7 +526,7 @@ public class Checker {
             if (child.getNodeType() == SynType.LVal) {
                 // 处理左值表达式（出现在赋值语句中）
                 // 文法：Stmt → LVal '=' Exp ';'
-                if (isAssignStmt) {
+                if (isAssignStmt || stmt instanceof IncStmt || stmt instanceof DecStmt) {
                     // 检查是否对常量进行赋值（错误类型h）
                     checkConstAssignment((BranchNode) child);
                 }
@@ -517,12 +555,17 @@ public class Checker {
                 // 文法：Stmt → 'printf' '(' StringConst { ',' Exp} ')' ';'
                 // 检查格式字符串与参数数量是否匹配（错误类型l）
                 checkPrintfFormat(stmt);
-            } else if (child.getNodeType() == SynType.CONTINUETK
-                    || child.getNodeType() == SynType.BREAKTK) {
-                // 处理break和continue语句
-                // 文法：Stmt → 'break' ';' | 'continue' ';'
+            } else if (child.getNodeType() == SynType.CONTINUETK) {
+                // 处理continue语句
                 // 检查是否在循环中使用（错误类型m）
                 if (loopNum < 1) {
+                    TokenNode tokenNode = (TokenNode) child;
+                    ErrorManager.AddError(Error.createError(ErrorType.BREAK_CONTINUE_ERR, tokenNode.getLineNumber()));
+                }
+            } else if (child.getNodeType() == SynType.BREAKTK) {
+                // 处理break语句
+                // 检查是否在循环或switch中使用（错误类型m）
+                if (loopNum < 1 && switchNum < 1) {
                     TokenNode tokenNode = (TokenNode) child;
                     ErrorManager.AddError(Error.createError(ErrorType.BREAK_CONTINUE_ERR, tokenNode.getLineNumber()));
                 }

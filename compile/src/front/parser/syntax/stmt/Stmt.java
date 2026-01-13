@@ -5,4 +5,8 @@ import front.parser.syntax.SynType;
 
 public class Stmt extends BranchNode {
     public Stmt() {super(SynType.Stmt);}
+
+    protected Stmt(SynType type) {
+        super(type);
+    }
 }

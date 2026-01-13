@@ -38,7 +38,7 @@ public class ForLoopStmt extends Stmt {
             }
         } else if (child.getNodeType() == SynType.Cond) {
             cond = (Cond) child;
-        } else if (child.getNodeType() == SynType.Stmt) {
+        } else if (child instanceof Stmt) {
             stmt = (Stmt) child;
         }
     }

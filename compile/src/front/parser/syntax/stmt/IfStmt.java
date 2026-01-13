@@ -28,7 +28,7 @@ public class IfStmt extends Stmt {
     public void appendChild(AstNode child) {
         if (child.getNodeType() == SynType.Cond) {
             condition = (Cond) child;
-        } else if (child.getNodeType() == SynType.Stmt) {
+        } else if (child instanceof Stmt) {
             if (alreadyHaveCondStmt) {
                 stmts.add((Stmt) child);
             } else {
